@@ -80,11 +80,33 @@ async function readJson<T>(
 
 export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> {
   const { ctx, connection } = deps;
+  const log = ctx.log.child({ component: "api" });
 
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const segments = url.pathname.split("/").filter(Boolean);
+    const resource = segments[0] === "api" ? segments[2] : segments[0];
+    const startedAt = performance.now();
 
+    const res = await route(req, url, segments, resource);
+
+    // One access line per request. Method + resource only — the raw path can
+    // carry a chatJid (PII). Latency in ms, rounded.
+    log.info("request", {
+      method: req.method,
+      resource: resource ?? null,
+      status: res.status,
+      durationMs: Math.round(performance.now() - startedAt),
+    });
+    return res;
+  };
+
+  async function route(
+    req: Request,
+    url: URL,
+    segments: string[],
+    resource: string | undefined,
+  ): Promise<Response> {
     // Unauthenticated health check.
     if (req.method === "GET" && url.pathname === "/health") {
       return json({ status: "ok" });
@@ -97,8 +119,6 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
     if (!isAuthorized(req, ctx.config.adminToken)) {
       return err(401, "unauthorized");
     }
-
-    const resource = segments[2];
 
     try {
       if (resource === "shoppers") {
@@ -120,10 +140,11 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
       }
       return err(404, "not found");
     } catch (e) {
-      console.error(`[api] ${req.method} ${url.pathname} error: ${String(e)}`);
+      // Log method + resource only — the raw path can carry a chatJid (PII).
+      log.error("request error", { method: req.method, resource, err: e });
       return err(500, "internal error");
     }
-  };
+  }
 }
 
 /** Non-secret view of the WhatsApp connection for the API. */

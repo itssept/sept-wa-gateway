@@ -23,6 +23,7 @@ import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { AuditLog } from "../storage/auditLog.ts";
 import type { OutboundDispatcher } from "./outboundDispatcher.ts";
 import type { Config } from "../config.ts";
+import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 export class InboundRouter {
@@ -35,11 +36,14 @@ export class InboundRouter {
     private readonly outboundLog: OutboundLog,
     private readonly dispatcher: OutboundDispatcher,
     private readonly audit: AuditLog,
+    private readonly log: Logger,
   ) {}
 
   /** Handle one captured inbound message. Never throws to the caller. */
   async handle(msg: InboundMessage): Promise<void> {
     const corrId = msg.messageId;
+    // corrId is the WhatsApp message id (opaque, not PII); bind it for the flow.
+    const log = this.log.child({ corrId, chatJid: maskJid(msg.chatJid) });
     try {
       if (!msg.text.trim()) return; // nothing to forward
 
@@ -50,18 +54,18 @@ export class InboundRouter {
           subjectId: msg.connectionId,
           detail: { chatJid: maskJid(msg.chatJid), reason: res.reason },
         });
-        console.log(`[inbound] drop ${maskJid(msg.chatJid)} corr=${corrId} reason=${res.reason}`);
+        log.info("inbound dropped", { reason: res.reason });
         return;
       }
       const shopper = res.shopper;
 
       const claim = this.outboundLog.claim(msg.connectionId, msg.messageId);
       if (claim.status === "already_sent") {
-        console.log(`[inbound] dedup ${corrId} (already answered)`);
+        log.info("inbound deduped (already answered)");
         return;
       }
       if (claim.status === "in_flight") {
-        console.log(`[inbound] skip ${corrId} (in flight)`);
+        log.info("inbound skipped (in flight)");
         return;
       }
 
@@ -69,10 +73,10 @@ export class InboundRouter {
       const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
       const roomName = this.config.mcp.useShopperRoom ? shopperRoomName(shopper.id) : null;
 
-      console.log(
-        `[inbound] ask ${maskJid(msg.chatJid)} corr=${corrId} shopper=${shopper.id} ` +
-          `${existing ? "continue" : "new"}`,
-      );
+      log.info("inbound ask", {
+        shopperId: shopper.id,
+        continuity: existing ? "continue" : "new",
+      });
 
       const ask = await this.adapter.ask(shopper.id, {
         query: msg.text,
@@ -107,7 +111,7 @@ export class InboundRouter {
         threadEventId: ask.threadEventId,
       });
     } catch (err) {
-      console.error(`[inbound] error corr=${corrId}: ${String(err)}`);
+      log.error("inbound error", { err });
     }
   }
 }

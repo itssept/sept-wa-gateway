@@ -29,12 +29,12 @@ import type { Config } from "../config.ts";
 import { useSqliteAuthState, type AuthStateHandle } from "./authState.ts";
 import { AntiBanQueue, type SendContext } from "./antiBan.ts";
 import { GroupMetaStore } from "./groupMeta.ts";
+import { rootLogger, type Logger } from "../logger.ts";
 import {
   e164ToPairingNumber,
   isGroupJid,
   jidUser,
   maskJid,
-  maskNumber,
   nowIso,
   phoneE164FromJid,
 } from "../util.ts";
@@ -88,14 +88,20 @@ interface LiveState {
 export class WhatsAppConnection {
   private live: LiveState;
   private readonly groups: GroupMetaStore;
+  private readonly log: Logger;
 
   constructor(
     private readonly db: Database,
     private readonly config: Config,
     private readonly antiBan: AntiBanQueue,
     private readonly hooks: SocketHooks = {},
+    log?: Logger,
   ) {
-    this.groups = new GroupMetaStore(db, config.groupMetaTtlMs);
+    this.log = (log ?? rootLogger).child({
+      component: "whatsapp",
+      connectionId: config.connectionId,
+    });
+    this.groups = new GroupMetaStore(db, config.groupMetaTtlMs, this.log);
     const auth = useSqliteAuthState(db, config.connectionId, config.dataEncryptionKey);
     const linkedAtMs = this.readLinkedAt();
     const persisted = this.readConnectionRow();
@@ -251,9 +257,7 @@ export class WhatsAppConnection {
       const v = await fetchLatestWaWebVersion({});
       version = v.version;
     } catch (err) {
-      console.warn(
-        `[socket] fetchLatestWaWebVersion failed, using library default (may be stale): ${String(err)}`,
-      );
+      this.log.warn("fetchLatestWaWebVersion failed, using library default (may be stale)", { err });
     }
 
     const sock = makeWASocket({
@@ -286,12 +290,12 @@ export class WhatsAppConnection {
         try {
           const code = await sock.requestPairingCode(number);
           this.live.pairingCode = code;
-          console.log(
-            `[socket] pairing code for ${maskNumber(this.live.number)}: ${code}`,
-          );
+          // The pairing code is a short-lived linking secret, not persistent PII;
+          // it is surfaced to the operator via the hook / stdout, not the log.
+          this.log.info("pairing code issued", { number: this.live.number });
           this.hooks.onPairingCode?.(this.config.connectionId, code);
         } catch (err) {
-          console.error(`[socket] requestPairingCode failed: ${String(err)}`);
+          this.log.error("requestPairingCode failed", { err });
         }
       }, 3_000);
     }
@@ -338,7 +342,7 @@ export class WhatsAppConnection {
       this.live.status = "linked";
       this.upsertConnectionRow("linked", linkedAtMs);
       if (first) {
-        console.log(`[socket] ${this.config.connectionId} linked`);
+        this.log.info("connection linked");
         this.hooks.onLinked?.(this.config.connectionId, linkedAtMs);
       }
       return;
@@ -366,9 +370,9 @@ export class WhatsAppConnection {
         this.live.status = "logged_out";
         this.upsertConnectionRow("logged_out");
         this.live.stopped = true;
-        console.error(
-          `[socket] ${this.config.connectionId} logged out — human must re-link. NOT auto-relinking.`,
-        );
+        this.log.error("logged out — human must re-link, NOT auto-relinking", {
+          loggedOutRetries: this.live.loggedOutRetries,
+        });
         this.hooks.onLoggedOut?.(this.config.connectionId);
         return;
       }
@@ -376,9 +380,9 @@ export class WhatsAppConnection {
       // Still pairing: transient closes (incl. a 401 mid-pairing) retry up to a cap.
       this.live.linkAttempts += 1;
       if (this.live.linkAttempts >= MAX_LINK_ATTEMPTS) {
-        console.error(
-          `[socket] ${this.config.connectionId} gave up linking after ${MAX_LINK_ATTEMPTS} attempts.`,
-        );
+        this.log.error("gave up linking after max attempts", {
+          attempts: MAX_LINK_ATTEMPTS,
+        });
         this.live.stopped = true;
         return;
       }

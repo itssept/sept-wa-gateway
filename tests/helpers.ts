@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 import { openDatabase } from "../src/storage/db.ts";
 import { createContext, type AppContext } from "../src/context.ts";
 import { makeHandler } from "../src/http/adminApi.ts";
+import { createLogger } from "../src/logger.ts";
 import type { Config } from "../src/config.ts";
 
 export const TEST_ADMIN_TOKEN = "test-admin-token-0123456789abcdef";
@@ -18,6 +19,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     adminToken: TEST_ADMIN_TOKEN,
     dataEncryptionKey: TEST_ENC_KEY,
     dbPath: ":memory:",
+    logLevel: "error",
     connectionId: "test-conn",
     deviceLabel: undefined,
     sendRatePerSec: 100,
@@ -73,13 +75,20 @@ export function makeTestApp(
   db: Database;
   handle: (req: Request) => Promise<Response>;
   connection?: FakeConnection;
+  /** Captured log lines (parsed JSON), in emit order. */
+  logs: Array<Record<string, unknown>>;
 } {
   const db = openDatabase(":memory:");
-  const ctx = createContext(config, db);
+  const logs: Array<Record<string, unknown>> = [];
+  const log = createLogger({
+    level: config.logLevel,
+    sink: (line) => logs.push(JSON.parse(line)),
+  });
+  const ctx = createContext(config, db, log);
   // The handler only uses the WhatsAppConnection's public surface; the fake
   // matches it structurally.
   const handle = makeHandler({ ctx, connection: connection as never });
-  return { ctx, db, handle, connection };
+  return { ctx, db, handle, connection, logs };
 }
 
 /** Parse a Response body as an arbitrary JSON object (test-only convenience). */

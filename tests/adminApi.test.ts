@@ -4,12 +4,51 @@
  */
 
 import { test, expect } from "bun:test";
-import { makeTestApp, adminReq, jsonBody, TEST_ADMIN_TOKEN } from "./helpers.ts";
+import { makeTestApp, adminReq, jsonBody, testConfig, TEST_ADMIN_TOKEN } from "./helpers.ts";
 
 test("health is unauthenticated", async () => {
   const { handle } = makeTestApp();
   const res = await handle(new Request("http://test/health"));
   expect(res.status).toBe(200);
+});
+
+test("emits one access log line per request (method, resource, status, latency)", async () => {
+  const { handle, logs } = makeTestApp(testConfig({ logLevel: "info" }));
+
+  await handle(new Request("http://test/health"));
+  const ok = await adminReq(handle, "GET", "/api/v1/shoppers");
+  expect(ok.status).toBe(200);
+  const unauthed = await adminReq(handle, "GET", "/api/v1/shoppers", undefined, "");
+  expect(unauthed.status).toBe(401);
+
+  const access = logs.filter((l) => l.msg === "request");
+  expect(access).toHaveLength(3);
+
+  // Health: unauthenticated, resource is "health", 200.
+  expect(access[0]).toMatchObject({ method: "GET", resource: "health", status: 200 });
+  // Authorized list: resource "shoppers", 200.
+  expect(access[1]).toMatchObject({ method: "GET", resource: "shoppers", status: 200 });
+  // Rejected auth still logs an access line with the 401 status.
+  expect(access[2]).toMatchObject({ method: "GET", resource: "shoppers", status: 401 });
+
+  // Latency is a rounded, non-negative number.
+  for (const line of access) {
+    expect(typeof line.durationMs).toBe("number");
+    expect(line.durationMs as number).toBeGreaterThanOrEqual(0);
+  }
+});
+
+test("access log never carries a raw chatJid from the path", async () => {
+  const { handle, logs } = makeTestApp(testConfig({ logLevel: "info" }));
+  // A mapping status route embeds the chatJid in the path; only the resource
+  // ("mappings") should appear in the access line, never the jid.
+  await adminReq(handle, "POST", "/api/v1/mappings/14155551212@s.whatsapp.net/status", {
+    enabled: false,
+  });
+  const access = logs.filter((l) => l.msg === "request");
+  expect(access).toHaveLength(1);
+  expect(access[0]).toMatchObject({ method: "POST", resource: "mappings" });
+  expect(JSON.stringify(access[0])).not.toContain("14155551212");
 });
 
 test("management endpoints require the admin token", async () => {

@@ -74,6 +74,35 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   unsolicited).
 - `connection_id` is a routing key, not an authorization boundary.
 
+## Observability (logging)
+
+The gateway is not wired to an external observability stack, so it emits
+**structured JSON logs** (one object per line) to **stderr**. Each line carries
+`level`, `time`, `msg`, a `component`, and any structured fields. Cloud log
+aggregation can ingest these directly.
+
+```json
+{"level":"info","time":"2026-09-04T16:02:18.454Z","msg":"inbound ask","component":"inbound","corrId":"3EB0...","chatJid":"***1212@s.whatsapp.net","shopperId":"shp_...","continuity":"new"}
+```
+
+- **Level** is set by `LOG_LEVEL` (`debug|info|warn|error`, default `info`).
+- **Access log:** the admin API emits one `info` line per request with
+  `method`, `resource`, `status`, and `durationMs`. It logs the **resource**
+  (`shoppers`, `mappings`, …), never the raw path — a path can embed a `chatJid`.
+- **Correlation:** each inbound flow binds a `corrId` (the WhatsApp message id)
+  so the inbound ask and the outbound send line up across components.
+- **PII is never logged raw.** Phone numbers, jids, and secrets are masked
+  (`maskNumber`/`maskJid`/`maskSecret`), and a **message body is never logged**
+  — only its length (`textLength`). The logger also runs a **defensive
+  redaction pass** (`src/logger.ts`): any field whose key looks sensitive
+  (`*jid`, `*phone`, `*token`, `text`/`body`/`query`, …) is re-masked or dropped
+  even if a call site forgets to mask. Prefer masking at the call site; the
+  redaction pass is the backstop.
+- **Baileys' own logs stay silent** (they are noisy and can carry uncontrolled
+  metadata). Only the gateway's own lifecycle/flow events are logged.
+- The pairing code is printed to **stdout** for the operator (it is a
+  short-lived linking secret, not persistent PII), separate from the log stream.
+
 ## PromptQL MCP integration
 
 The gateway is an **MCP client**. This section reflects the **verified live

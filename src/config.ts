@@ -53,6 +53,9 @@ const EnvSchema = z.object({
   // Storage.
   GATEWAY_DB_PATH: z.string().default("./data/sept-wa-gateway.sqlite"),
 
+  // Structured logging. JSON lines to stderr; level gates verbosity.
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+
   // WhatsApp connection. One connection per process for now; the schema is
   // connection_id-keyed so multi-number is an additive change later. The NUMBER
   // is not configured here — it is set at runtime via POST /api/v1/connection/link
@@ -97,6 +100,7 @@ export interface Config {
   adminToken: string;
   dataEncryptionKey: Buffer;
   dbPath: string;
+  logLevel: "debug" | "info" | "warn" | "error";
 
   connectionId: string;
   deviceLabel: string | undefined;
@@ -144,6 +148,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminToken: e.GATEWAY_ADMIN_TOKEN,
     dataEncryptionKey: e.DATA_ENCRYPTION_KEY,
     dbPath: e.GATEWAY_DB_PATH,
+    logLevel: e.LOG_LEVEL,
 
     connectionId: e.WHATSAPP_CONNECTION_ID,
     deviceLabel: e.WHATSAPP_DEVICE_LABEL || undefined,

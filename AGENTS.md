@@ -100,10 +100,27 @@ Verified against the live MCP server. Details in [README.md](README.md#promptql-
   `thread_id`. Outbound idempotency: `whatsapp_outbound_log` keyed on
   `(connection_id, inbound message id)` with claim-token fencing.
 
+## Logging (PII contract — READ BEFORE ADDING A LOG LINE)
+
+- **Use the structured logger** (`src/logger.ts`), never `console.*`. Get a
+  bound child via `ctx.log.child({ component, ... })`; propagate `corrId`
+  (the WhatsApp message id) through a flow.
+- **Never log raw PII or secrets.** Mask at the call site with
+  `maskJid` / `maskNumber` / `maskSecret`. **Never log a message body** — log
+  `textLength` only. The logger's defensive redaction pass re-masks sensitive
+  keys and drops content keys (`text`/`body`/`query`/…) as a backstop, but do
+  not rely on it — mask at the source.
+- **Errors** go in the `err` field (`log.error("...", { err })`) — it is
+  serialized to `{name, message}` and skips content redaction.
+- **stdout is reserved** for the operator pairing code; logs go to **stderr**.
+- Keep **Baileys silent** (no logger passed to `makeWASocket`) — it can emit
+  jids/metadata we do not control.
+
 ## Module map
 
 `config.ts` (Zod env) · `crypto.ts` (AES-256-GCM, constant-time) · `util.ts`
-(jid/E164 + masking) · `storage/` (migrations + repos) · `whatsapp/`
+(jid/E164 + masking) · `logger.ts` (structured JSON logs + PII redaction) ·
+`storage/` (migrations + repos) · `whatsapp/`
 (authState, socket, antiBan) · `security/` (admin auth) · `promptql/`
 (mcpClient, adapter, discover) · `routing/` (resolver, inbound, outbound) ·
 `http/` (adminApi, server) · `context.ts` (wiring).

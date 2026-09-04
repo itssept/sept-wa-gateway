@@ -13,11 +13,13 @@ import { AntiBanQueue } from "../whatsapp/antiBan.ts";
 import { InboundRouter } from "../routing/inboundRouter.ts";
 import { OutboundDispatcher } from "../routing/outboundDispatcher.ts";
 import { makeHandler } from "./adminApi.ts";
+import { rootLogger } from "../logger.ts";
 import { maskNumber } from "../util.ts";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const ctx = createContext(config);
+  const log = ctx.log.child({ component: "server" });
 
   const antiBan = new AntiBanQueue({
     sendRatePerSec: config.sendRatePerSec,
@@ -39,7 +41,7 @@ async function main(): Promise<void> {
         subjectType: "connection",
         subjectId: connId,
       });
-      console.error(`[server] connection ${connId} logged out — re-link required.`);
+      log.error("connection logged out — re-link required", { connectionId: connId });
     },
     onLinked: (connId) => {
       ctx.audit.record("connection.link", {
@@ -48,9 +50,11 @@ async function main(): Promise<void> {
       });
     },
     onPairingCode: (_connId, code) => {
+      // Operator-facing: the pairing code must be visible on stdout to link the
+      // device. It is a short-lived linking secret, not persistent PII.
       console.log(`\n==== WhatsApp pairing code: ${code} ====\n`);
     },
-  });
+  }, ctx.log);
 
   const dispatcher = new OutboundDispatcher(
     ctx.adapter,
@@ -58,6 +62,7 @@ async function main(): Promise<void> {
     ctx.outboundLog,
     connection,
     config,
+    ctx.log.child({ component: "outbound" }),
   );
 
   router = new InboundRouter(
@@ -69,6 +74,7 @@ async function main(): Promise<void> {
     ctx.outboundLog,
     dispatcher,
     ctx.audit,
+    ctx.log.child({ component: "inbound" }),
   );
 
   const handle = makeHandler({ ctx, connection });
@@ -79,29 +85,26 @@ async function main(): Promise<void> {
     fetch: handle,
   });
 
-  console.log(
-    `[server] HTTP listening on http://${config.apiHost}:${config.apiPort}`,
-  );
-  console.log(
-    `[server] MCP endpoint: ${config.mcp.endpoint || "(not configured — set PROMPTQL_PROJECT_URL)"}`,
-  );
+  log.info("HTTP listening", { host: config.apiHost, port: config.apiPort });
+  log.info("MCP endpoint", {
+    endpoint: config.mcp.endpoint || null,
+    configured: Boolean(config.mcp.endpoint),
+  });
 
   // On boot we only RESUME an already-linked session (reconnect with the saved,
   // encrypted creds — no pairing). Pairing a NEW number happens exclusively via
   // POST /api/v1/connection/link, so a PromptQL project fully manages linking.
   if (connection.status === "linked") {
-    console.log(
-      `[server] resuming linked WhatsApp connection (${maskNumber(connection.number)}) ...`,
-    );
+    log.info("resuming linked WhatsApp connection", {
+      number: maskNumber(connection.number),
+    });
     await connection.start();
   } else {
-    console.log(
-      "[server] no linked session — waiting for POST /api/v1/connection/link",
-    );
+    log.info("no linked session — waiting for POST /api/v1/connection/link");
   }
 
   const shutdown = () => {
-    console.log("[server] shutting down (ws.close, session preserved) ...");
+    log.info("shutting down (ws.close, session preserved)");
     connection.stop();
     server.stop();
     ctx.db.close();
@@ -112,6 +115,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(`[server] fatal: ${String(err)}`);
+  rootLogger.child({ component: "server" }).error("fatal", { err });
   process.exit(1);
 });

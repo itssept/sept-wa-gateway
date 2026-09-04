@@ -9,7 +9,8 @@
 
 import type { Database } from "bun:sqlite";
 import type { GroupMetadata, WASocket } from "baileys";
-import { nowIso, phoneE164FromJid } from "../util.ts";
+import { rootLogger, type Logger } from "../logger.ts";
+import { maskJid, nowIso, phoneE164FromJid } from "../util.ts";
 
 export interface GroupParticipant {
   jid: string;
@@ -44,10 +45,15 @@ function toParticipants(meta: GroupMetadata): GroupParticipant[] {
 }
 
 export class GroupMetaStore {
+  private readonly log: Logger;
+
   constructor(
     private readonly db: Database,
     private readonly ttlMs: number,
-  ) {}
+    log?: Logger,
+  ) {
+    this.log = (log ?? rootLogger).child({ component: "groupMeta" });
+  }
 
   /** Persist metadata from a Baileys GroupMetadata object. */
   upsert(connectionId: string, meta: GroupMetadata): void {
@@ -123,9 +129,11 @@ export class GroupMetaStore {
       this.upsert(connectionId, fresh);
       return this.read(connectionId, groupJid);
     } catch (err) {
-      console.warn(
-        `[groupMeta] fetch failed conn=${connectionId} group=${groupJid}: ${String(err)}`,
-      );
+      this.log.warn("group metadata fetch failed", {
+        connectionId,
+        groupJid: maskJid(groupJid),
+        err,
+      });
       return cached; // serve stale rather than nothing
     }
   }

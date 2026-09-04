@@ -18,6 +18,7 @@
  */
 
 import type { Config } from "../config.ts";
+import { rootLogger, type Logger } from "../logger.ts";
 import { McpSession, McpError } from "./mcpClient.ts";
 
 const TOOL_ASK = "ask_promptql";
@@ -38,12 +39,17 @@ export interface AdapterDeps {
   config: Config;
   /** Resolve a shopper's MCP-scoped token at call time. Never cached in cleartext. */
   getToken: (shopperId: string) => string | null;
+  /** Optional structured logger; defaults to the process root logger. */
+  log?: Logger;
 }
 
 export class PromptQlAdapter {
   private readonly sessions = new Map<string, McpSession>();
+  private readonly log: Logger;
 
-  constructor(private readonly deps: AdapterDeps) {}
+  constructor(private readonly deps: AdapterDeps) {
+    this.log = deps.log ?? rootLogger.child({ component: "promptql" });
+  }
 
   private session(shopperId: string): McpSession {
     const cached = this.sessions.get(shopperId);
@@ -160,7 +166,7 @@ export class PromptQlAdapter {
           decision: "decline",
         });
       } catch (err) {
-        console.warn(`[promptql] failed to decline approval ${a.approval_id}: ${String(err)}`);
+        this.log.warn("failed to decline approval", { approvalId: a.approval_id, err });
       }
     }
   }

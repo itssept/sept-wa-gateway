@@ -16,6 +16,7 @@ import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { WhatsAppConnection } from "../whatsapp/socket.ts";
 import type { Config } from "../config.ts";
+import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 export interface DispatchInput {
@@ -36,6 +37,7 @@ export class OutboundDispatcher {
     private readonly outboundLog: OutboundLog,
     private readonly connection: WhatsAppConnection,
     private readonly config: Config,
+    private readonly log: Logger,
   ) {}
 
   async dispatch(input: DispatchInput): Promise<void> {
@@ -73,17 +75,27 @@ export class OutboundDispatcher {
         input.claimToken,
         { chatJid: input.chatJid, messageRef: ref },
       );
-      if (ok) console.log(`[outbound] sent ${maskJid(input.chatJid)} ref=${ref}`);
-      else console.warn(`[outbound] claim lost for ${input.idempotencyKey}`);
+      const log = this.log.child({ corrId: input.idempotencyKey, chatJid: maskJid(input.chatJid) });
+      if (ok) log.info("outbound sent", { messageRef: ref });
+      else log.warn("outbound claim lost");
     } catch (err) {
       this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
-      console.error(`[outbound] send failed ${maskJid(input.chatJid)}: ${String(err)}`);
+      this.log.error("outbound send failed", {
+        corrId: input.idempotencyKey,
+        chatJid: maskJid(input.chatJid),
+        err,
+      });
     }
   }
 
   private fail(input: DispatchInput, reason: string): void {
     this.workflows.markFailed(input.workflowId);
     this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
-    console.warn(`[outbound] no result for ${maskJid(input.chatJid)} wf=${input.workflowId}: ${reason}`);
+    this.log.warn("outbound no result", {
+      corrId: input.idempotencyKey,
+      chatJid: maskJid(input.chatJid),
+      workflowId: input.workflowId,
+      reason,
+    });
   }
 }
