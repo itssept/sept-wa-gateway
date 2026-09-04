@@ -186,22 +186,8 @@ curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
 Every `/api/v1/*` endpoint requires the admin token. A PromptQL project can call
 these to manage the gateway (connection, shoppers, mappings).
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/health` | Liveness (unauthenticated). |
-| GET | `/api/v1/connection` | Connection status + current pairing code. |
-| POST | `/api/v1/connection/link` | Start pairing for a number (wipes session, returns 202). |
-| POST | `/api/v1/connection/unlink` | Stop + wipe session so a new number can link. |
-| POST | `/api/v1/shoppers` | Register a shopper + set its MCP credential. Idempotent on phone. |
-| GET | `/api/v1/shoppers` | List shoppers (non-secret). |
-| GET | `/api/v1/shoppers/:id` | Read one shopper + its credential info. |
-| POST | `/api/v1/shoppers/:id/status` | Enable / disable. |
-| POST | `/api/v1/shoppers/:id/credential/rotate` | Rotate the MCP token. |
-| POST | `/api/v1/shoppers/:id/credential/revoke` | Revoke the MCP token. |
-| GET | `/api/v1/mappings` | List chat mappings. |
-| POST | `/api/v1/mappings` | Upsert a chat → shopper mapping. |
-| POST | `/api/v1/mappings/:chatJid/status` | Enable / disable a mapping. |
-| GET | `/api/v1/status` | Connection + counts (debug). |
+Full reference — endpoints, request/response shapes, and error codes — is in
+**[docs/admin-api.md](docs/admin-api.md)**.
 
 ## Deployment (cloud)
 
