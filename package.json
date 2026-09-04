@@ -1,0 +1,29 @@
+{
+  "name": "sept-wa-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SEPT local WhatsApp gateway: Baileys transport + shopper routing + PromptQL MCP client. Local-first prototype.",
+  "scripts": {
+    "dev": "bun run --watch src/http/server.ts",
+    "start": "bun run src/http/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "mcp:discover": "bun run src/promptql/discover.ts"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "baileys": "7.0.0-rc14",
+    "qrcode": "^1.5.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@types/qrcode": "^1.5.5",
+    "typescript": "^5.5.0"
+  },
+  "trustedDependencies": [
+    "baileys",
+    "protobufjs"
+  ]
+}

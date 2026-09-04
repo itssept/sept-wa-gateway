@@ -1,0 +1,25 @@
+# SEPT WhatsApp Gateway — local/dev compose.
+# `just up` builds and starts the gateway. Config is read from .env.
+#
+# The SQLite DB (encrypted session state + secrets) is bind-mounted from the
+# repo's ./data dir so it persists across `up`/`down` and container rebuilds.
+# ./data is git-ignored.
+
+services:
+  gateway:
+    build: .
+    image: sept-wa-gateway
+    container_name: sept-wa-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override the DB path to the mounted volume, regardless of what .env sets.
+      GATEWAY_DB_PATH: /data/sept-wa-gateway.sqlite
+      GATEWAY_API_HOST: 0.0.0.0
+      GATEWAY_API_PORT: "8790"
+    ports:
+      - "${GATEWAY_API_PORT:-8790}:8790"
+    volumes:
+      # Persist the SQLite file inside the repo (git-ignored).
+      - ./data:/data
