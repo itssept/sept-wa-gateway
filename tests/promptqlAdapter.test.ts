@@ -55,11 +55,42 @@ test("ask returns thread_id + thread_event_id and passes room on new thread", as
     ],
   });
   const a = new PromptQlAdapter(deps);
-  const res = await a.ask("shopper-1", { query: "hi", threadId: null, roomName: "sept-x" });
+  const files = [
+    {
+      file_name: "whatsapp-image-message-1.jpg",
+      mime_type: "image/jpeg",
+      content_base64: "aW1hZ2U=",
+    },
+  ];
+  const res = await a.ask("shopper-1", {
+    query: "hi",
+    threadId: null,
+    roomName: "sept-x",
+    files,
+  });
   expect(res).toEqual({ threadId: "t1", threadEventId: "e1" });
   expect(toolCalls[0].name).toBe("ask_promptql");
   expect(toolCalls[0].args.room_name).toBe("sept-x");
+  expect(toolCalls[0].args.files).toEqual(files);
   expect(toolCalls[0].args.thread_id).toBeUndefined();
+});
+
+test("ask rejects an invalid outbound file payload before transmission", async () => {
+  const { toolCalls } = scriptByTool({ toolResults: [] });
+  const a = new PromptQlAdapter(deps);
+  await expect(
+    a.ask("shopper-1", {
+      query: "hi",
+      files: [
+        {
+          file_name: "",
+          mime_type: "image/jpeg",
+          content_base64: "not base64!",
+        },
+      ],
+    }),
+  ).rejects.toThrow();
+  expect(toolCalls).toHaveLength(0);
 });
 
 test("ask continues an existing thread (passes thread_id, no room)", async () => {

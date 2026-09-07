@@ -35,7 +35,7 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 | Config | `src/config.ts` | Zod-validated env. MCP URL / path / auth scheme configurable. |
 | Crypto | `src/crypto.ts` | AES-256-GCM at rest, constant-time compare, one-way hash. |
 | Storage | `src/storage/` | SQLite migrations + repositories. |
-| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth state, socket lifecycle, anti-ban send queue. |
+| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth, socket lifecycle, anti-ban queue, media download and object storage. |
 | Security | `src/security/` | Admin auth (constant-time). |
 | PromptQL | `src/promptql/` | MCP client (JSON-RPC 2.0 / Streamable HTTP), adapter, discovery diagnostic. |
 | Routing | `src/routing/` | Resolver, inbound router, outbound dispatcher. |
@@ -54,6 +54,13 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 - **Each shopper gets its own MCP session,** so PromptQL attributes the work to
   the right service account. Follow-up messages continue the same bot (per-chat
   continuity in `chat_bot`).
+- **Media is downloaded transiently and attached to PromptQL.** WhatsApp CDN
+  URLs expire, so supported image, video, audio, document, and sticker messages
+  are downloaded into bounded memory and relayed through `ask_promptql.files`.
+  The bytes are discarded after the MCP call accepts or exhausts its retries;
+  they are never persisted by the gateway. A process crash loses any in-flight
+  media. The raw-media limit is 7 MiB so base64 plus query metadata stays below
+  the default 10 MiB MCP request cap.
 - **Every `/api/v1/*` endpoint requires the admin token** (`GATEWAY_ADMIN_TOKEN`,
   constant-time compare). Secrets are encrypted at rest and never logged or
   returned after creation. Rejected senders are silently dropped with an audit
@@ -130,8 +137,8 @@ docker run -d --name sept-wa-gateway -p 8790:8790 \
 
 Two things must be right or the deploy breaks:
 
-- **Durable volume at `/data`** holds the SQLite DB (encrypted session +
-  secrets). Back it up; losing it forces a re-link and re-registration.
+- **Durable volume at `/data`** holds the SQLite DB (encrypted session and
+  secrets). Back it up; losing it forces a re-link and shopper re-registration.
 - **`DATA_ENCRYPTION_KEY` must stay stable** across restarts, or that persisted
   state becomes unreadable. Provision it out of band.
 

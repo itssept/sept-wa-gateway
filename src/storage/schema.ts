@@ -213,4 +213,15 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+
+  {
+    version: 4,
+    name: "transient_media_delivery",
+    sql: /* sql */ `
+      -- Reserved migration version. An earlier unmerged implementation used
+      -- this version for persistent media pointers. Media is now transient and
+      -- requires no schema changes; keeping the version avoids future reuse.
+      SELECT 1;
+    `,
+  },
 ];

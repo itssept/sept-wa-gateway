@@ -62,3 +62,22 @@ test("config composes the MCP endpoint from project url + path", () => {
   expect(cfg.mcp.endpoint).toBe("https://proj.example.com/mcp");
   resetConfigForTests();
 });
+
+test("transient media limit defaults to and is capped at 7 MiB", () => {
+  resetConfigForTests();
+  const config = loadConfig({
+    GATEWAY_ADMIN_TOKEN: "0123456789abcdef0123",
+    DATA_ENCRYPTION_KEY: "0".repeat(64),
+  } as NodeJS.ProcessEnv);
+  expect(config.maxMediaBytes).toBe(7 * 1024 * 1024);
+
+  resetConfigForTests();
+  expect(() =>
+    loadConfig({
+      GATEWAY_ADMIN_TOKEN: "0123456789abcdef0123",
+      DATA_ENCRYPTION_KEY: "0".repeat(64),
+      WHATSAPP_MAX_MEDIA_BYTES: String(7 * 1024 * 1024 + 1),
+    } as NodeJS.ProcessEnv),
+  ).toThrow(/must not exceed 7 MiB/);
+  resetConfigForTests();
+});

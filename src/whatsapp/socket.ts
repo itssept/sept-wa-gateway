@@ -30,6 +30,13 @@ import { useSqliteAuthState, type AuthStateHandle } from "./authState.ts";
 import { AntiBanQueue, type SendContext } from "./antiBan.ts";
 import { GroupMetaStore } from "./groupMeta.ts";
 import { rootLogger, type Logger } from "../logger.ts";
+import type { MessageStore } from "../storage/messageStore.ts";
+import {
+  classifyMessage,
+  TransientMediaDownloader,
+  type DownloadedMedia,
+  type MediaStatus,
+} from "./media.ts";
 import {
   e164ToPairingNumber,
   isGroupJid,
@@ -54,13 +61,16 @@ export interface InboundMessage {
   messageId: string;
   ts: number;
   text: string;
+  msgType: string;
+  mediaStatus: MediaStatus;
+  media: DownloadedMedia | null;
   isGroup: boolean;
   fromMe: boolean;
 }
 
 export interface SocketHooks {
   /** Called for each captured inbound message (already persisted). */
-  onInbound?: (msg: InboundMessage) => void;
+  onInbound?: (msg: InboundMessage) => void | Promise<void>;
   /** Called when the connection transitions to logged_out (human must re-link). */
   onLoggedOut?: (connectionId: string) => void;
   /** Called with a fresh pairing code to show the operator. */
@@ -90,12 +100,15 @@ interface LiveState {
 export class WhatsAppConnection {
   private live: LiveState;
   private readonly groups: GroupMetaStore;
+  private readonly media: TransientMediaDownloader;
   private readonly log: Logger;
+  private inboundQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly db: Database,
     private readonly config: Config,
     private readonly antiBan: AntiBanQueue,
+    private readonly messages: MessageStore,
     private readonly hooks: SocketHooks = {},
     log?: Logger,
   ) {
@@ -104,6 +117,10 @@ export class WhatsAppConnection {
       connectionId: config.connectionId,
     });
     this.groups = new GroupMetaStore(db, config.groupMetaTtlMs, this.log);
+    this.media = new TransientMediaDownloader(
+      config.maxMediaBytes,
+      this.log.child({ component: "media" }),
+    );
     const auth = useSqliteAuthState(db, config.connectionId, config.dataEncryptionKey);
     const linkedAtMs = this.readLinkedAt();
     const persisted = this.readConnectionRow();
@@ -303,7 +320,15 @@ export class WhatsAppConnection {
     }
 
     sock.ev.on("connection.update", (u) => this.onConnectionUpdate(u));
-    sock.ev.on("messages.upsert", (up) => this.onMessagesUpsert(up));
+    sock.ev.on("messages.upsert", (up) => {
+      // Queue the whole download → PromptQL handoff. This bounds transient
+      // attachment memory even when Baileys emits several upsert events.
+      this.inboundQueue = this.inboundQueue
+        .then(() => this.onMessagesUpsert(up, sock))
+        .catch((err) => {
+          this.log.error("inbound batch handling failed", { err });
+        });
+    });
 
     // groups.update / group-participants.update → keep the group-metadata cache
     // fresh so cachedGroupMetadata stays warm (anti-ban).
@@ -400,14 +425,41 @@ export class WhatsAppConnection {
     }, backoff);
   }
 
-  private onMessagesUpsert(up: { messages: WAMessage[]; type: string }): void {
+  private async onMessagesUpsert(
+    up: { messages: WAMessage[]; type: string },
+    sock: WASocket,
+  ): Promise<void> {
     if (up.type !== "notify" && up.type !== "append") return;
-    for (const m of up.messages) {
-      const parsed = this.parseMessage(m);
-      if (!parsed) continue;
-      this.persistMessage(parsed);
-      // fromMe messages are captured for loop-prevention but never routed.
-      if (!parsed.fromMe) this.hooks.onInbound?.(parsed);
+    for (const message of up.messages) {
+      try {
+        const parsed = this.parseMessage(message);
+        if (!parsed) continue;
+
+        // fromMe messages are captured for loop prevention but never need
+        // their media downloaded.
+        if (parsed.fromMe) {
+          this.messages.capture(parsed);
+          continue;
+        }
+
+        // Download into bounded memory before the WhatsApp CDN URL expires.
+        // The router releases these bytes after ask_promptql accepts or fails.
+        const { status, media } = await this.media.download(message, sock);
+        parsed.mediaStatus = status;
+        parsed.media = media;
+        this.messages.capture(parsed);
+        try {
+          // Await the handoff so this upsert batch does not retain several
+          // attachment buffers while PromptQL accepts/retries earlier ones.
+          await this.hooks.onInbound?.(parsed);
+        } finally {
+          // The downloader owns this transient buffer and always releases it,
+          // even if routing or MCP submission fails.
+          parsed.media = null;
+        }
+      } catch (err) {
+        this.log.error("inbound message handling failed", { err });
+      }
     }
   }
 
@@ -464,32 +516,14 @@ export class WhatsAppConnection {
       messageId,
       ts,
       text,
+      msgType: classifyMessage(m),
+      mediaStatus: "none",
+      media: null,
       isGroup,
       fromMe,
     };
   }
 
-  private persistMessage(msg: InboundMessage): void {
-    // Idempotent capture — the unique index dedups replays.
-    this.db.run(
-      `INSERT OR IGNORE INTO whatsapp_message_store
-         (id, connection_id, chat_jid, sender_jid, sender_phone_e164,
-          message_id, ts, msg_type, text, from_me, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'text', ?, ?, ?)`,
-      [
-        crypto.randomUUID(),
-        msg.connectionId,
-        msg.chatJid,
-        msg.senderJid,
-        msg.senderPhoneE164,
-        msg.messageId,
-        msg.ts,
-        msg.text,
-        msg.fromMe ? 1 : 0,
-        nowIso(),
-      ],
-    );
-  }
 
   /**
    * Send a text message through the anti-ban queue. Returns the Baileys message

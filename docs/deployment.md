@@ -66,7 +66,7 @@ them, but you must satisfy them:
 |---|---|---|
 | **Exposed port** | `8790` (`GATEWAY_API_PORT`) | The management + routing HTTP API. Map/route it. |
 | **Bind address** | `0.0.0.0` (`GATEWAY_API_HOST`) | Reachable inside the container network. Put it behind your ingress. |
-| **Data volume** | `/data` (declared `VOLUME`) | SQLite DB path is baked to `/data` (`GATEWAY_DB_PATH`). Mount durable, backed-up storage here. |
+| **Data volume** | `/data` (declared `VOLUME`) | Holds SQLite session and credential state. Mount durable, backed-up storage here. |
 
 **The `/data` volume is not optional.** It holds the only copy of:
 
@@ -110,6 +110,7 @@ secrets), never baked into the image. See `.env.example` for the annotated list.
 | `WHATSAPP_WARMUP_DAYS` | `3` | Anti-ban warm-up ramp. |
 | `WHATSAPP_MAX_PENDING_SENDS_PER_CONNECTION` | `100` | Backpressure bound. |
 | `WHATSAPP_GROUP_META_TTL_MS` | `3600000` | Group metadata cache TTL. |
+| `WHATSAPP_MAX_MEDIA_BYTES` | `7340032` | Raw-media limit, capped at 7 MiB. Media stays in memory only while `ask_promptql` accepts or retries the request. |
 | `WHATSAPP_MESSAGE_RETENTION_DAYS` | `90` | Retention window (purge job not yet wired). |
 | `PROMPTQL_MCP_AUTH_SCHEME` | `pat` | Auth scheme prefixed to the per-shopper token. |
 | `PROMPTQL_MCP_PROTOCOL_VERSION` | `2025-03-26` | MCP `initialize` protocol version. |

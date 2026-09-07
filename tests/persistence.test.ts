@@ -109,6 +109,11 @@ test("re-running migrations on an existing DB is a no-op (version bump safe)", (
       .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM _gateway_migrations")
       .get()!.n;
     expect(applied2).toBe(applied1);
+    const messageColumns = db2
+      .query<{ name: string }, []>("PRAGMA table_info(whatsapp_message_store)")
+      .all()
+      .map((column) => column.name);
+    expect(messageColumns.some((name) => name.startsWith("media_"))).toBe(false);
     db2.close();
   } finally {
     for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });

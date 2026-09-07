@@ -17,6 +17,7 @@
  * sensitive action on behalf of an unauthenticated WhatsApp sender.
  */
 
+import { z } from "zod";
 import type { Config } from "../config.ts";
 import { rootLogger, type Logger } from "../logger.ts";
 import { McpSession, McpError } from "./mcpClient.ts";
@@ -29,6 +30,18 @@ export interface AskResult {
   threadId: string;
   threadEventId: string | null;
 }
+
+const PromptQlFileInputSchema = z
+  .object({
+    file_name: z.string().min(1).max(255),
+    mime_type: z.string().min(1).max(255),
+    content_base64: z.string().min(1).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+  })
+  .strict();
+
+const PromptQlFilesSchema = z.array(PromptQlFileInputSchema).max(1);
+
+export type PromptQlFileInput = z.infer<typeof PromptQlFileInputSchema>;
 
 export type BotResponse =
   | { status: "completed"; message: string }
@@ -91,11 +104,20 @@ export class PromptQlAdapter {
    */
   async ask(
     shopperId: string,
-    input: { query: string; threadId?: string | null; roomName?: string | null },
+    input: {
+      query: string;
+      threadId?: string | null;
+      roomName?: string | null;
+      files?: PromptQlFileInput[];
+    },
   ): Promise<AskResult> {
     const args: Record<string, unknown> = { query: input.query };
     if (input.threadId) args.thread_id = input.threadId;
     if (input.roomName) args.room_name = input.roomName;
+    if (input.files?.length) {
+      // Validate the new outbound MCP I/O boundary before transmission.
+      args.files = PromptQlFilesSchema.parse(input.files);
+    }
 
     const result = await this.session(shopperId).callTool(TOOL_ASK, args);
     const sc = (result.structured ?? {}) as {

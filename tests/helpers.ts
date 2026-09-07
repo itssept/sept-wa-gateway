@@ -19,6 +19,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     adminToken: TEST_ADMIN_TOKEN,
     dataEncryptionKey: TEST_ENC_KEY,
     dbPath: ":memory:",
+    maxMediaBytes: 7 * 1024 * 1024,
     logLevel: "error",
     connectionId: "test-conn",
     deviceLabel: undefined,

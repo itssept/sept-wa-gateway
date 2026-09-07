@@ -50,8 +50,17 @@ const EnvSchema = z.object({
   // Encryption at rest.
   DATA_ENCRYPTION_KEY: EncryptionKey,
 
-  // Storage.
+  // Storage. Media is transient and is never written to disk/object storage.
   GATEWAY_DB_PATH: z.string().default("./data/sept-wa-gateway.sqlite"),
+  WHATSAPP_MAX_MEDIA_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(
+      7 * 1024 * 1024,
+      "WHATSAPP_MAX_MEDIA_BYTES must not exceed 7 MiB (PromptQL MCP request limit)",
+    )
+    .default(7 * 1024 * 1024),
 
   // Structured logging. JSON lines to stderr; level gates verbosity.
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
@@ -95,6 +104,7 @@ export interface Config {
   adminToken: string;
   dataEncryptionKey: Buffer;
   dbPath: string;
+  maxMediaBytes: number;
   logLevel: "debug" | "info" | "warn" | "error";
 
   connectionId: string;
@@ -142,6 +152,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminToken: e.GATEWAY_ADMIN_TOKEN,
     dataEncryptionKey: e.DATA_ENCRYPTION_KEY,
     dbPath: e.GATEWAY_DB_PATH,
+    maxMediaBytes: e.WHATSAPP_MAX_MEDIA_BYTES,
     logLevel: e.LOG_LEVEL,
 
     connectionId: e.WHATSAPP_CONNECTION_ID,

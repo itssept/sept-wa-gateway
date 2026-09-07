@@ -16,6 +16,7 @@ import { ChatBotRepo } from "./storage/chatBotRepo.ts";
 import { PromptQlAdapter } from "./promptql/promptqlAdapter.ts";
 import { ShopperResolver } from "./routing/resolver.ts";
 import { createLogger, type Logger } from "./logger.ts";
+import { MessageStore } from "./storage/messageStore.ts";
 
 export interface AppContext {
   config: Config;
@@ -28,6 +29,7 @@ export interface AppContext {
   outboundLog: OutboundLog;
   workflows: McpWorkflowRepo;
   chatBots: ChatBotRepo;
+  messages: MessageStore;
   adapter: PromptQlAdapter;
   resolver: ShopperResolver;
 }
@@ -42,6 +44,7 @@ export function createContext(config: Config, db?: Database, log?: Logger): AppC
   const outboundLog = new OutboundLog(database);
   const workflows = new McpWorkflowRepo(database);
   const chatBots = new ChatBotRepo(database);
+  const messages = new MessageStore(database);
   const adapter = new PromptQlAdapter({
     config,
     getToken: (shopperId) => credentials.getActiveToken(shopperId),
@@ -60,6 +63,7 @@ export function createContext(config: Config, db?: Database, log?: Logger): AppC
     outboundLog,
     workflows,
     chatBots,
+    messages,
     adapter,
     resolver,
   };

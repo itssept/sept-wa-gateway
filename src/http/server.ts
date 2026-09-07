@@ -32,29 +32,36 @@ async function main(): Promise<void> {
   // first with a deferred onInbound, then wiring the router once all exist.
   let router: InboundRouter | null = null;
 
-  const connection = new WhatsAppConnection(ctx.db, config, antiBan, {
-    onInbound: (msg) => {
-      void router?.handle(msg);
+  const connection = new WhatsAppConnection(
+    ctx.db,
+    config,
+    antiBan,
+    ctx.messages,
+    {
+      onInbound: (msg) => router?.handle(msg),
+      onLoggedOut: (connId) => {
+        ctx.audit.record("connection.logged_out", {
+          subjectType: "connection",
+          subjectId: connId,
+        });
+        log.error("connection logged out — re-link required", {
+          connectionId: connId,
+        });
+      },
+      onLinked: (connId) => {
+        ctx.audit.record("connection.link", {
+          subjectType: "connection",
+          subjectId: connId,
+        });
+      },
+      onPairingCode: (_connId, code) => {
+        // Operator-facing: the pairing code must be visible on stdout to link the
+        // device. It is a short-lived linking secret, not persistent PII.
+        console.log(`\n==== WhatsApp pairing code: ${code} ====\n`);
+      },
     },
-    onLoggedOut: (connId) => {
-      ctx.audit.record("connection.logged_out", {
-        subjectType: "connection",
-        subjectId: connId,
-      });
-      log.error("connection logged out — re-link required", { connectionId: connId });
-    },
-    onLinked: (connId) => {
-      ctx.audit.record("connection.link", {
-        subjectType: "connection",
-        subjectId: connId,
-      });
-    },
-    onPairingCode: (_connId, code) => {
-      // Operator-facing: the pairing code must be visible on stdout to link the
-      // device. It is a short-lived linking secret, not persistent PII.
-      console.log(`\n==== WhatsApp pairing code: ${code} ====\n`);
-    },
-  }, ctx.log);
+    ctx.log,
+  );
 
   const dispatcher = new OutboundDispatcher(
     ctx.adapter,
