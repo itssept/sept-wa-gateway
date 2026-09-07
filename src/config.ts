@@ -34,9 +34,6 @@ const EncryptionKey = z.string().transform((raw, ctx) => {
   return buf;
 });
 
-/** Strip a trailing slash so `${url}${path}` never doubles the separator. */
-const trimTrailingSlash = (s: string) => s.replace(/\/+$/, "");
-
 const EnvSchema = z.object({
   // HTTP API
   GATEWAY_API_PORT: z.coerce.number().int().positive().default(8790),
@@ -85,9 +82,10 @@ const EnvSchema = z.object({
   // Retention.
   WHATSAPP_MESSAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
 
-  // PromptQL MCP — URL + path + auth scheme are ALL configurable.
-  PROMPTQL_PROJECT_URL: z.string().url().or(z.literal("")).default(""),
-  PROMPTQL_MCP_PATH: z.string().default("/mcp"),
+  // PromptQL MCP — the full endpoint URL (scheme + host + path + query). The
+  // project name is a `project-name` query param inside this URL. Empty until
+  // configured (MCP disabled). Auth scheme is separately configurable.
+  PROMPTQL_MCP_URL: z.string().url().or(z.literal("")).default(""),
   PROMPTQL_MCP_AUTH_SCHEME: z.string().default("pat"),
   PROMPTQL_MCP_PROTOCOL_VERSION: z.string().default("2025-03-26"),
   PROMPTQL_MCP_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -117,10 +115,8 @@ export interface Config {
   messageRetentionDays: number;
 
   mcp: {
-    /** Fully composed endpoint: `${projectUrl}${mcpPath}`. Empty until configured. */
+    /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
     endpoint: string;
-    projectUrl: string;
-    path: string;
     authScheme: string;
     protocolVersion: string;
     timeoutMs: number;
@@ -141,10 +137,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid gateway configuration:\n${issues}`);
   }
   const e = parsed.data;
-  const projectUrl = trimTrailingSlash(e.PROMPTQL_PROJECT_URL);
-  const path = e.PROMPTQL_MCP_PATH.startsWith("/")
-    ? e.PROMPTQL_MCP_PATH
-    : `/${e.PROMPTQL_MCP_PATH}`;
 
   cached = {
     apiPort: e.GATEWAY_API_PORT,
@@ -165,9 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
 
     mcp: {
-      endpoint: projectUrl ? `${projectUrl}${path}` : "",
-      projectUrl,
-      path,
+      endpoint: e.PROMPTQL_MCP_URL,
       authScheme: e.PROMPTQL_MCP_AUTH_SCHEME,
       protocolVersion: e.PROMPTQL_MCP_PROTOCOL_VERSION,
       timeoutMs: e.PROMPTQL_MCP_TIMEOUT_MS,

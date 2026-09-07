@@ -130,8 +130,7 @@ docker run -d --name sept-wa-gateway -p 8790:8790 \
   -v sept-wa-data:/data \
   -e DATA_ENCRYPTION_KEY=<64 hex> \
   -e GATEWAY_ADMIN_TOKEN=<64 hex> \
-  -e PROMPTQL_PROJECT_URL=https://data.prompt.ql.app \
-  -e 'PROMPTQL_MCP_PATH=/promptql/mcp-server/mcp?project-name=<project>' \
+  -e 'PROMPTQL_MCP_URL=https://data.prompt.ql.app/promptql/mcp-server/mcp?project-name=<project>' \
   ghcr.io/hasura/sept-wa-gateway:latest
 ```
 

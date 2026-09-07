@@ -18,7 +18,7 @@ import { maskSecret } from "../util.ts";
 async function main(): Promise<void> {
   const config = loadConfig();
   if (!config.mcp.endpoint) {
-    console.error("PROMPTQL_PROJECT_URL is not set. Configure it in .env first.");
+    console.error("PROMPTQL_MCP_URL is not set. Configure it in .env first.");
     process.exit(2);
   }
 

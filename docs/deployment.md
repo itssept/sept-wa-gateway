@@ -93,8 +93,7 @@ secrets), never baked into the image. See `.env.example` for the annotated list.
 |---|---|
 | `GATEWAY_ADMIN_TOKEN` | Admin credential for `/api/v1/*`, constant-time compared. Generate: `openssl rand -hex 32`. |
 | `DATA_ENCRYPTION_KEY` | 32-byte key (64 hex) for AES-256-GCM at rest. **Must stay stable** across restarts/redeploys or persisted session + secrets become unreadable. Generate: `openssl rand -hex 32`. |
-| `PROMPTQL_PROJECT_URL` | PromptQL base URL (scheme + host), no trailing slash. e.g. `https://data.prompt.ql.app`. |
-| `PROMPTQL_MCP_PATH` | MCP path + query appended to the base. Must include the `project-name` query param. e.g. `/promptql/mcp-server/mcp?project-name=<project>`. |
+| `PROMPTQL_MCP_URL` | Full PromptQL MCP endpoint URL, pasted verbatim. Must include the `project-name` query param. e.g. `https://data.prompt.ql.app/promptql/mcp-server/mcp?project-name=<project>`. |
 
 ### Optional (sensible defaults)
 
@@ -134,7 +133,7 @@ secrets), never baked into the image. See `.env.example` for the annotated list.
    not `latest`, for reproducible deploys).
 2. **Provision secrets** out of band: `GATEWAY_ADMIN_TOKEN`,
    `DATA_ENCRYPTION_KEY` (both `openssl rand -hex 32`).
-3. **Set PromptQL config**: `PROMPTQL_PROJECT_URL` + `PROMPTQL_MCP_PATH`.
+3. **Set PromptQL config**: `PROMPTQL_MCP_URL` (the full MCP endpoint URL).
 4. **Mount a durable, backed-up volume at `/data`.** Confirm `DATA_ENCRYPTION_KEY`
    is stored so it survives redeploys.
 5. **Expose port `8790`** behind your ingress. The admin token gates every

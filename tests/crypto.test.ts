@@ -51,15 +51,17 @@ test("config rejects a bad encryption key length", () => {
   ).toThrow(/DATA_ENCRYPTION_KEY/);
 });
 
-test("config composes the MCP endpoint from project url + path", () => {
+test("config takes the MCP endpoint from PROMPTQL_MCP_URL verbatim", () => {
   resetConfigForTests();
   const cfg = loadConfig({
     GATEWAY_ADMIN_TOKEN: "0123456789abcdef0123",
     DATA_ENCRYPTION_KEY: "0".repeat(64),
-    PROMPTQL_PROJECT_URL: "https://proj.example.com/",
-    PROMPTQL_MCP_PATH: "/mcp",
+    PROMPTQL_MCP_URL:
+      "https://proj.example.com/mcp-server/mcp?project-name=demo",
   } as NodeJS.ProcessEnv);
-  expect(cfg.mcp.endpoint).toBe("https://proj.example.com/mcp");
+  expect(cfg.mcp.endpoint).toBe(
+    "https://proj.example.com/mcp-server/mcp?project-name=demo",
+  );
   resetConfigForTests();
 });
 

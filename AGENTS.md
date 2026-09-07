@@ -47,8 +47,8 @@ A linked WhatsApp session can be **banned** by bad behavior. These are hard rule
 Verified against the live MCP server (probed 2026-09-04).
 
 - **Endpoint** = `<base>/mcp-server/mcp?project-name=<project>`. Project is a
-  **query param**. The full URL is config (`PROMPTQL_PROJECT_URL` +
-  `PROMPTQL_MCP_PATH`); never hardcode it.
+  **query param**. The full URL is config — one var, `PROMPTQL_MCP_URL`, set
+  verbatim (`config.mcp.endpoint`); never hardcode it.
 - **Auth**: `Authorization: pat <token>` (scheme configurable).
 - **Every response is SSE** (`text/event-stream`), including `initialize`. The
   server is **sessionless** — do NOT send an invented `Mcp-Session-Id` (a bogus

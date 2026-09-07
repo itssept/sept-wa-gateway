@@ -30,8 +30,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     messageRetentionDays: 90,
     mcp: {
       endpoint: "https://example.test/mcp",
-      projectUrl: "https://example.test",
-      path: "/mcp",
       authScheme: "pat",
       protocolVersion: "2025-03-26",
       timeoutMs: 5_000,
