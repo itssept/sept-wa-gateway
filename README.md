@@ -298,9 +298,9 @@ Verified:
 
 Remaining to close the milestone:
 
-- [ ] Run one **personal WhatsApp number** end-to-end through the tunnel (link
+- [x] Run one **personal WhatsApp number** end-to-end through the tunnel (link
       the number, map the chat, send a message, receive the reply).
-- [ ] Confirm in the PromptQL console that audit attributes the work to the
+- [x] Confirm in the PromptQL console that audit attributes the work to the
       shopper's service account (needs a per-shopper service-account token, not
       the shared test PAT).
 - [ ] Decide shopper vs separate assistant identity for production (schema
