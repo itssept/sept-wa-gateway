@@ -44,7 +44,7 @@ A linked WhatsApp session can be **banned** by bad behavior. These are hard rule
 
 ## The PromptQL MCP contract (verified live — do not re-guess)
 
-Verified against the live MCP server. Details in [README.md](README.md#promptql-mcp-integration).
+Verified against the live MCP server (probed 2026-09-04).
 
 - **Endpoint** = `<base>/mcp-server/mcp?project-name=<project>`. Project is a
   **query param**. The full URL is config (`PROMPTQL_PROJECT_URL` +
@@ -143,3 +143,20 @@ Verified against the live MCP server. Details in [README.md](README.md#promptql-
 - Keep MCP-specific code behind the adapter; keep Baileys code out of routing.
 - Don't put business catalogs, inventory, or agent logic here — the gateway is a
   transport + routing layer. Business logic lives in PromptQL.
+
+## Open decisions (current choices)
+
+Kept visible per the handoff. Current choices are marked.
+
+| Decision | Current choice |
+|---|---|
+| DM vs group mapping model | **Same model** — any chat jid (DM or group) maps to a shopper. |
+| Mirror every message vs explicit invocation | **Mirror every** inbound message from a mapped shopper. |
+| One service account vs shopper + assistant identities | **One** MCP-scoped service account per shopper. Schema (`shopper_credential.label`) keeps room for a second identity. |
+| Response path: webhook / poll / other | **ask_promptql → blocking get_latest_promptql_thread_response** (verified). Re-poll on `analyzing`; auto-decline `waiting_approval`. |
+| Bot (thread) continuity | **Persist per chat** in `chat_bot` — follow-up messages continue the same bot. |
+| Approvals (`waiting_approval`) | **Auto-decline + notify** the shopper to approve in the console. |
+| Thread room scoping | **Caller-owned per-shopper room** — `roomName` is set at registration and sent verbatim. The gateway does not derive or own room semantics. |
+| Shopper deletion vs disabling | **Disable only** for now (status flag). Hard delete not implemented. |
+| Local tunnel + auth | **ngrok** (or equivalent) + admin token. Tunnel URL is not a boundary. |
+| Local data + secret retention / backup | SQLite at `GATEWAY_DB_PATH`; message retention `WHATSAPP_MESSAGE_RETENTION_DAYS` (purge job not yet wired). Secrets encrypted at rest under `DATA_ENCRYPTION_KEY`. |
