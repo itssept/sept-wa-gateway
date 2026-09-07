@@ -16,6 +16,11 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"        # v1.2.3
       - "v[0-9]+.[0-9]+.[0-9]+-*"      # v1.2.3-rc1, pre-releases
   workflow_dispatch:
+    inputs:
+      image_name:
+        description: "Image name (owner/repo). Leave blank to use this repository."
+        required: false
+        type: string
 
 # Serialise publishes for the same ref; do not cancel a push mid-flight.
 concurrency:
@@ -24,7 +29,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # <owner>/<repo>, lowercased by the action
+  # Manual dispatch may override the name; empty input falls back to the repo.
+  IMAGE_NAME: ${{ github.event.inputs.image_name || github.repository }}   # <owner>/<repo>, lowercased by the action
 
 jobs:
   # Build each architecture on its native runner and push by digest.
