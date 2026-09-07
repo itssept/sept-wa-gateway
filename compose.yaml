@@ -1,8 +1,8 @@
 # SEPT WhatsApp Gateway — local/dev compose.
 # `just up` builds and starts the gateway. Config is read from .env.
 #
-# The SQLite DB and disk media store are bind-mounted from the
-# repo's ./data dir so it persists across `up`/`down` and container rebuilds.
+# The SQLite DB is bind-mounted from the repo's ./data dir so it persists
+# across `up`/`down` and container rebuilds.
 # ./data is git-ignored.
 
 services:
@@ -16,7 +16,6 @@ services:
     environment:
       # Override the DB path to the mounted volume, regardless of what .env sets.
       GATEWAY_DB_PATH: /data/sept-wa-gateway.sqlite
-      WHATSAPP_MEDIA_DISK_PATH: /data/media-store
       GATEWAY_API_HOST: 0.0.0.0
       GATEWAY_API_PORT: "8790"
     ports:

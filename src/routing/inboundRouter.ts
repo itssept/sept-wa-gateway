@@ -89,7 +89,7 @@ export class InboundRouter {
       let ask;
       try {
         // McpSession retries transient transport failures with this same
-        // in-memory payload. No disk/S3 retry copy is created.
+        // in-memory payload. No persistent retry copy is created.
         ask = await this.adapter.ask(shopper.id, {
           query,
           threadId: existing?.threadId ?? null,

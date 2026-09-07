@@ -102,10 +102,10 @@ Verified against the live MCP server (probed 2026-09-04).
 
 ## Keying & storage
 
-- Media is downloaded on receipt into the configured disk or S3 object store
-  because WhatsApp CDN URLs expire. SQLite stores pointers and metadata only.
-  Keep chat-scoped lookup, the declared + streamed byte limits, and the
-  `chat_id` + `message_id` PromptQL descriptor intact.
+- Media is downloaded promptly because WhatsApp CDN URLs expire, held only in
+  bounded memory while the PromptQL MCP submission is attempted, and then
+  released. Never persist media to SQLite, disk, or object storage. Preserve
+  the declared + streamed byte limits and attachment filename/MIME validation.
 - All relational state is in **SQLite**, keyed by `connection_id`. Schema +
   append-only migrations live in `src/storage/schema.ts`, run by
   `src/storage/db.ts`. Add a new migration; never edit an applied one.
@@ -136,7 +136,7 @@ Verified against the live MCP server (probed 2026-09-04).
 `config.ts` (Zod env) · `crypto.ts` (AES-256-GCM, constant-time) · `util.ts`
 (jid/E164 + masking) · `logger.ts` (structured JSON logs + PII redaction) ·
 `storage/` (migrations + repos) · `whatsapp/`
-(authState, socket, antiBan, mediaStore) · `security/` (admin auth) · `promptql/`
+(authState, socket, antiBan, media) · `security/` (admin auth) · `promptql/`
 (mcpClient, adapter, discover) · `routing/` (resolver, inbound, outbound) ·
 `http/` (adminApi, server) · `context.ts` (wiring).
 
