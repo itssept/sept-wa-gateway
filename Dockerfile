@@ -1,15 +1,39 @@
 # SEPT WhatsApp Gateway — Bun runtime image.
 #
-# Baileys needs a couple of native deps (ffi via node-gyp is avoided by baileys
-# 7, but we keep the toolchain slim). The DB and encrypted session state live on
-# a MOUNTED VOLUME at /data — never bake them into the image.
+# Multi-stage build. The final runtime image contains ONLY a bundled,
+# minified application (dist/), production node_modules, and package.json.
+# It deliberately never copies src/ or tsconfig.json, so the readable
+# TypeScript source is not shipped to anyone who pulls the image. (Bundling
+# and minification reduce casual source exposure; they do not make the
+# implementation unrecoverable.)
+#
+# Baileys pulls native deps (protobuf); we keep node_modules external to the
+# bundle so those resolve at runtime instead of being inlined. The DB and
+# encrypted session state live on a MOUNTED VOLUME at /data — never baked in.
 
+# --- deps: resolve production dependencies against the lockfile. ---
 FROM oven/bun:1.2 AS deps
 WORKDIR /app
-# Install dependencies against the lockfile for reproducibility.
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
+# --- build: bundle + minify the app into dist/server.js. ---
+# Dependencies stay EXTERNAL (--packages external): baileys and its native
+# protobuf bits are loaded from node_modules at runtime, not inlined. This
+# stage needs the full (dev) dependency tree for the bundler + type stubs.
+FROM oven/bun:1.2 AS build
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+RUN bun build src/http/server.ts \
+      --target=bun \
+      --packages=external \
+      --minify \
+      --outfile dist/server.js
+
+# --- runtime: minimal image, no source. ---
 FROM oven/bun:1.2 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
@@ -18,10 +42,10 @@ ENV NODE_ENV=production
 # shows on the repo's Packages panel).
 LABEL org.opencontainers.image.source="https://github.com/hasura/sept-wa-gateway"
 
-# App + resolved node_modules.
+# Bundled app + resolved production node_modules only. No src/, no tsconfig.
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json bun.lock tsconfig.json ./
-COPY src ./src
+COPY --from=build /app/dist ./dist
+COPY package.json ./
 
 # Durable state lives here — mount a volume at /data in your platform.
 ENV GATEWAY_DB_PATH=/data/sept-wa-gateway.sqlite
@@ -33,5 +57,5 @@ RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 8790
 
-# Run directly from TypeScript source (Bun executes .ts).
-CMD ["bun", "run", "src/http/server.ts"]
+# Run the bundled entrypoint (Bun executes the minified JS).
+CMD ["bun", "run", "dist/server.js"]
