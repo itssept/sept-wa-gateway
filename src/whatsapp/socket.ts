@@ -33,8 +33,10 @@ import { rootLogger, type Logger } from "../logger.ts";
 import {
   e164ToPairingNumber,
   isGroupJid,
+  isLidJid,
   jidUser,
   maskJid,
+  maskNumber,
   nowIso,
   phoneE164FromJid,
 } from "../util.ts";
@@ -418,13 +420,47 @@ export class WhatsAppConnection {
     const isGroup = isGroupJid(chatJid);
     // In a group, participant is the real sender; in a DM it's the chat jid.
     const senderJid = isGroup ? (m.key.participant ?? chatJid) : chatJid;
+
+    // LID addressing: when WhatsApp delivers over a LID (`<id>@lid`), the sender
+    // jid carries NO phone number. Baileys surfaces the phone-number (`@s.what...`)
+    // counterpart on the *Alt fields of the key — `remoteJidAlt` for a DM,
+    // `participantAlt` for a group participant. Prefer that for phone derivation
+    // so sender-based routing still resolves; fall back to the sender jid itself
+    // when it already carries the phone (pn addressing).
+    const phoneBearingJid = isGroup
+      ? (m.key.participantAlt ?? senderJid)
+      : (m.key.remoteJidAlt ?? senderJid);
+    const senderPhoneE164 =
+      phoneE164FromJid(phoneBearingJid) ?? phoneE164FromJid(senderJid);
+
+    // LID observability. Sender-based routing depends on recovering a phone from
+    // the *Alt field of a LID-addressed message. Keep a durable signal for it:
+    //  - success is `debug` (off at info): quiet unless you are diagnosing.
+    //  - FAILURE is `warn`: a LID message with no derivable phone will drop as
+    //    `unmapped` with no other explanation. This line is how you find out WA
+    //    stopped populating the alt (or shipped a new addressing variant), rather
+    //    than a real shopper's message silently vanishing.
+    const isLid = isLidJid(senderJid) || m.key.addressingMode === "lid";
+    if (isLid && !senderPhoneE164) {
+      this.log.warn("lid message: no phone derivable (will not sender-resolve)", {
+        addressingMode: m.key.addressingMode,
+        senderJid: maskJid(senderJid),
+        hasRemoteJidAlt: Boolean(m.key.remoteJidAlt),
+        hasParticipantAlt: Boolean(m.key.participantAlt),
+      });
+    } else if (isLid) {
+      this.log.debug("lid message: resolved phone from alt jid", {
+        derivedPhone: maskNumber(senderPhoneE164),
+      });
+    }
+
     const text = extractText(m);
     const ts = Number(m.messageTimestamp ?? 0) * 1000 || Date.now();
     return {
       connectionId: this.config.connectionId,
       chatJid,
       senderJid,
-      senderPhoneE164: phoneE164FromJid(senderJid),
+      senderPhoneE164,
       messageId,
       ts,
       text,

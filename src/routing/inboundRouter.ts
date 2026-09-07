@@ -6,7 +6,7 @@
  *     audit log, no WhatsApp reply (respects anti-ban / never-unsolicited).
  *  3. Claim outbound idempotency on the inbound message id (replay-safe).
  *  4. Look up the chat's existing PromptQL bot (thread) for continuity; start a
- *     new one on the first message (per-shopper room when configured).
+ *     new one on the first message in the shopper's caller-owned room.
  *  5. ask_promptql under the shopper's service-account identity.
  *  6. Persist the bot handle + a durable workflow correlation, then hand off to
  *     the OutboundDispatcher (blocking wait -> paced send).
@@ -16,19 +16,17 @@
 
 import type { InboundMessage } from "../whatsapp/socket.ts";
 import type { ShopperResolver } from "./resolver.ts";
-import { PromptQlAdapter, shopperRoomName } from "../promptql/promptqlAdapter.ts";
+import { PromptQlAdapter } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { ChatBotRepo } from "../storage/chatBotRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { AuditLog } from "../storage/auditLog.ts";
 import type { OutboundDispatcher } from "./outboundDispatcher.ts";
-import type { Config } from "../config.ts";
 import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 export class InboundRouter {
   constructor(
-    private readonly config: Config,
     private readonly resolver: ShopperResolver,
     private readonly adapter: PromptQlAdapter,
     private readonly workflows: McpWorkflowRepo,
@@ -47,7 +45,7 @@ export class InboundRouter {
     try {
       if (!msg.text.trim()) return; // nothing to forward
 
-      const res = this.resolver.resolve(msg.connectionId, msg.chatJid);
+      const res = this.resolver.resolve(msg.connectionId, msg.chatJid, msg.senderPhoneE164);
       if (!res.ok) {
         this.audit.record("inbound.rejected", {
           subjectType: "connection",
@@ -71,11 +69,13 @@ export class InboundRouter {
 
       // Continue the chat's existing bot (thread) when we have one.
       const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
-      const roomName = this.config.mcp.useShopperRoom ? shopperRoomName(shopper.id) : null;
+      // Room is caller-owned: use the shopper's stored room_name verbatim.
+      const roomName = shopper.roomName;
 
       log.info("inbound ask", {
         shopperId: shopper.id,
         continuity: existing ? "continue" : "new",
+        resolvedVia: res.via, // "mapping" (admin-set) or "sender" (auto by phone)
       });
 
       const ask = await this.adapter.ask(shopper.id, {

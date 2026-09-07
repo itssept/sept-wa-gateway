@@ -66,7 +66,6 @@ async function main(): Promise<void> {
   );
 
   router = new InboundRouter(
-    config,
     ctx.resolver,
     ctx.adapter,
     ctx.workflows,

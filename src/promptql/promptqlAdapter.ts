@@ -171,17 +171,3 @@ export class PromptQlAdapter {
     }
   }
 }
-
-/**
- * Derive a valid PromptQL room_name from a shopper id. The room_name pattern is
- * lowercase letters/digits with single `-`/`_` separators, max 80 chars. We
- * lowercase, replace invalid runs with `-`, trim separators, and prefix so it
- * always starts with a letter.
- */
-export function shopperRoomName(shopperId: string): string {
-  const cleaned = shopperId
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `sept-${cleaned}`.slice(0, 80).replace(/-+$/g, "");
-}

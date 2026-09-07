@@ -45,17 +45,31 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 ## Identity model
 
 - A **shopper** must be registered before their WhatsApp messages are processed.
-  Registration stores: name, canonical phone (E.164), a generated shopper id,
-  and one MCP-scoped **service-account** token (encrypted at rest, never
-  returned after creation).
-- A **chat mapping** binds a WhatsApp chat/group jid to exactly one shopper. A
-  jid resolves to at most one shopper, so routing is never ambiguous.
+  Registration stores: name, canonical phone (E.164), a generated shopper id, a
+  caller-owned PromptQL **`roomName`**, and one MCP-scoped **service-account**
+  token (encrypted at rest, never returned after creation).
+- The **room name is caller-owned**. The registrant supplies `roomName`; the
+  gateway stores it verbatim and passes it to PromptQL when starting the
+  shopper's thread. The gateway does not derive or own room semantics.
+- **Routing is internal and keyed on the sender.** The gateway **auto-resolves
+  by the message sender's phone** — the participant in a group, the chat in a DM
+  — to a registered, enabled shopper. Senders that are not registered shoppers
+  are dropped (`unregistered_sender`). There is **no mappings API**: callers work
+  in shoppers and phone numbers, not WhatsApp jids/lids. An internal chat→shopper
+  mapping table exists (and overrides the sender fallback when set) for pinning
+  specific chats, but it is not exposed over the API.
+- **Trust-model note (pilot):** auto-resolution takes shopper identity from the
+  WhatsApp message (the sender's number). This is an intentional override of the
+  stricter "identity never from a message" rule, accepted because WhatsApp
+  verifies a DM account owns its number.
 - A PromptQL service account is a non-human project identity. A WhatsApp chat is
   **not** a PromptQL user. The gateway maps WhatsApp identity → shopper → the
   shopper's MCP credential, and PromptQL attributes the work to that service
   account.
-- Shopper/service-account identity is **never** taken from a WhatsApp message.
-  It is resolved from the authenticated gateway mapping.
+- Shopper identity is resolved from an explicit gateway mapping when one exists;
+  otherwise from the message sender's phone (pilot override, see above). Either
+  way, the **MCP credential** and service-account attribution come from the
+  resolved shopper's stored record, never from message content.
 
 ## Security model
 
@@ -69,9 +83,9 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   a `tokenFingerprint` (sha256).
 - Create / rotate / revoke / disable / mapping changes are recorded in
   `audit_log`.
-- Unknown, disabled, unmapped, or credential-less senders are **silently
-  dropped** with an audit line — no WhatsApp reply (respects anti-ban / never
-  unsolicited).
+- Senders that resolve to no enabled shopper — unregistered, unmapped, disabled,
+  or credential-less — are **silently dropped** with an audit line, no WhatsApp
+  reply (respects anti-ban / never unsolicited).
 - `connection_id` is a routing key, not an authorization boundary.
 
 ## Observability (logging)
@@ -143,7 +157,9 @@ concatenates them.
    action for an unauthenticated WhatsApp sender.
 
 Each shopper gets its own MCP session so PromptQL attributes work to the right
-service account. Per-chat continuity is stored in `chat_bot`
+service account. New threads are opened in the shopper's caller-owned `roomName`
+(set at registration); the gateway sends it verbatim and does not derive a room.
+Per-chat continuity is stored in `chat_bot`
 (`connection_id, chat_jid → thread_id`), so follow-up WhatsApp messages continue
 the same bot (verified: it remembered context across two messages).
 
@@ -196,24 +212,24 @@ there is no boot-time number config. (Pairing a *new* number always goes through
 Expose the API through a tunnel for local testing (`ngrok http 8790`). The
 tunnel URL is not a security boundary — the admin token gates every call.
 
-### Register a shopper and map a chat
+### Register a shopper
 
 ```bash
 # Create/register a shopper + set its MCP credential.
+# roomName is the caller-owned PromptQL room_name for this shopper (mandatory).
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/shoppers \
-  -d '{"name":"Rakesh","phone":"+14155551212","mcpToken":"<mcp-scoped-token>"}'
-
-# Map the WhatsApp DM jid to that shopper (use the shopper id from above).
-curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
-  -X POST $BASE/api/v1/mappings \
-  -d '{"chatJid":"14155551212@s.whatsapp.net","shopperId":"<shopper-id>"}'
+  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<mcp-scoped-token>"}'
 ```
+
+That is all the setup a shopper needs. Once registered, the shopper's own
+WhatsApp messages to the linked number auto-route by their phone — no chat
+mapping step, and callers never handle WhatsApp jids.
 
 ## Management API
 
 Every `/api/v1/*` endpoint requires the admin token. A PromptQL project can call
-these to manage the gateway (connection, shoppers, mappings).
+these to manage the gateway (connection, shoppers).
 
 Full reference — endpoints, request/response shapes, and error codes — is in
 **[docs/admin-api.md](docs/admin-api.md)**.
@@ -261,7 +277,7 @@ Kept visible here per the handoff. Current choices are marked.
 | Response path: webhook / poll / other | **ask_promptql → blocking get_latest_promptql_thread_response** (verified). Re-poll on `analyzing`; auto-decline `waiting_approval`. |
 | Bot (thread) continuity | **Persist per chat** in `chat_bot` — follow-up messages continue the same bot. |
 | Approvals (`waiting_approval`) | **Auto-decline + notify** the shopper to approve in the console. |
-| Thread room scoping | **Per-shopper room** (`PROMPTQL_USE_SHOPPER_ROOM=true`, derived `room_name`). Set false for roomless/private. |
+| Thread room scoping | **Caller-owned per-shopper room** — `roomName` is set at registration (`POST /api/v1/shoppers`) and sent verbatim. The gateway does not derive or own room semantics. |
 | Shopper deletion vs disabling | **Disable only** for now (status flag). Hard delete not implemented. |
 | Local tunnel + auth | **ngrok** (or equivalent) + admin token. Tunnel URL is not a boundary. |
 | Local data + secret retention / backup | SQLite at `GATEWAY_DB_PATH`; message retention `WHATSAPP_MESSAGE_RETENTION_DAYS` (purge job not yet wired). Secrets encrypted at rest under `DATA_ENCRYPTION_KEY`. |

@@ -38,16 +38,16 @@ test("emits one access log line per request (method, resource, status, latency)"
   }
 });
 
-test("access log never carries a raw chatJid from the path", async () => {
+test("access log never carries a raw path segment (only the resource)", async () => {
   const { handle, logs } = makeTestApp(testConfig({ logLevel: "info" }));
-  // A mapping status route embeds the chatJid in the path; only the resource
-  // ("mappings") should appear in the access line, never the jid.
-  await adminReq(handle, "POST", "/api/v1/mappings/14155551212@s.whatsapp.net/status", {
-    enabled: false,
+  // A shopper sub-route embeds an id in the path; only the resource
+  // ("shoppers") should appear in the access line, never the raw segment.
+  await adminReq(handle, "POST", "/api/v1/shoppers/14155551212@s.whatsapp.net/status", {
+    status: "disabled",
   });
   const access = logs.filter((l) => l.msg === "request");
   expect(access).toHaveLength(1);
-  expect(access[0]).toMatchObject({ method: "POST", resource: "mappings" });
+  expect(access[0]).toMatchObject({ method: "POST", resource: "shoppers" });
   expect(JSON.stringify(access[0])).not.toContain("14155551212");
 });
 
@@ -81,9 +81,18 @@ test("malformed and invalid payloads are rejected", async () => {
   const badPhone = await adminReq(handle, "POST", "/api/v1/shoppers", {
     name: "x",
     phone: "abc",
+    roomName: "room-x",
     mcpToken: "12345678",
   });
   expect(badPhone.status).toBe(422);
+
+  // Missing mandatory roomName → 422.
+  const noRoom = await adminReq(handle, "POST", "/api/v1/shoppers", {
+    name: "x",
+    phone: "+14155551212",
+    mcpToken: "12345678",
+  });
+  expect(noRoom.status).toBe(422);
 });
 
 test("shopper creation never returns the raw token, only a fingerprint", async () => {
@@ -91,6 +100,7 @@ test("shopper creation never returns the raw token, only a fingerprint", async (
   const res = await adminReq(handle, "POST", "/api/v1/shoppers", {
     name: "Rakesh",
     phone: "+1 (415) 555-1212",
+    roomName: "rakesh-room",
     mcpToken: "super-secret-mcp-token",
   });
   expect(res.status).toBe(201);
@@ -100,6 +110,8 @@ test("shopper creation never returns the raw token, only a fingerprint", async (
   expect(body.credential.tokenFingerprint).toBeString();
   // Phone canonicalized.
   expect(body.shopper.phoneE164).toBe("+14155551212");
+  // Caller-owned room stored verbatim.
+  expect(body.shopper.roomName).toBe("rakesh-room");
 });
 
 test("duplicate registration is idempotent (same phone → 200, same id)", async () => {
@@ -107,6 +119,7 @@ test("duplicate registration is idempotent (same phone → 200, same id)", async
   const first = await adminReq(handle, "POST", "/api/v1/shoppers", {
     name: "Rakesh",
     phone: "+14155551212",
+    roomName: "rakesh-room",
     mcpToken: "token-a-12345678",
   });
   expect(first.status).toBe(201);
@@ -115,6 +128,7 @@ test("duplicate registration is idempotent (same phone → 200, same id)", async
   const second = await adminReq(handle, "POST", "/api/v1/shoppers", {
     name: "Rakesh",
     phone: "14155551212", // equivalent form
+    roomName: "rakesh-room",
     mcpToken: "token-b-12345678",
   });
   expect(second.status).toBe(200);
@@ -128,6 +142,7 @@ test("credential rotation revokes the old and returns a new active credential", 
     await adminReq(handle, "POST", "/api/v1/shoppers", {
       name: "R",
       phone: "+14155551212",
+      roomName: "r-room",
       mcpToken: "old-token-12345678",
     }),
   );
@@ -157,6 +172,7 @@ test("credential revoke removes the active token", async () => {
     await adminReq(handle, "POST", "/api/v1/shoppers", {
       name: "R",
       phone: "+14155551212",
+      roomName: "r-room",
       mcpToken: "tok-12345678",
     }),
   );
@@ -166,11 +182,14 @@ test("credential revoke removes the active token", async () => {
   expect(ctx.credentials.getActiveToken(id)).toBeNull();
 });
 
-test("mapping upsert requires an existing shopper", async () => {
+test("mappings are internal: the mappings API is not exposed", async () => {
   const { handle } = makeTestApp();
-  const bad = await adminReq(handle, "POST", "/api/v1/mappings", {
+  // Mappings are an internal routing mechanism; there is no public endpoint.
+  const post = await adminReq(handle, "POST", "/api/v1/mappings", {
     chatJid: "14155551212@s.whatsapp.net",
-    shopperId: "does-not-exist",
+    shopperId: "whatever",
   });
-  expect(bad.status).toBe(422);
+  expect(post.status).toBe(404);
+  const get = await adminReq(handle, "GET", "/api/v1/mappings");
+  expect(get.status).toBe(404);
 });

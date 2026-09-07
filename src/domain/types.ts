@@ -11,6 +11,8 @@ export interface Shopper {
   id: string;
   name: string;
   phoneE164: string;
+  /** Caller-owned PromptQL room_name. The gateway stores it verbatim and never derives it. */
+  roomName: string;
   status: ShopperStatus;
   createdAt: string;
   updatedAt: string;
@@ -39,8 +41,13 @@ export interface ChatMapping {
 
 /** Result of resolving an inbound chat jid to a shopper for processing. */
 export type ResolveResult =
-  | { ok: true; shopper: Shopper }
+  | { ok: true; shopper: Shopper; via: "mapping" | "sender" }
   | {
       ok: false;
-      reason: "unmapped" | "mapping_disabled" | "shopper_disabled" | "no_active_credential";
+      reason:
+        | "unmapped"
+        | "unregistered_sender"
+        | "mapping_disabled"
+        | "shopper_disabled"
+        | "no_active_credential";
     };

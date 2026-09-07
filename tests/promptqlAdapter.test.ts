@@ -4,7 +4,7 @@
  */
 
 import { test, expect, afterEach } from "bun:test";
-import { PromptQlAdapter, shopperRoomName } from "../src/promptql/promptqlAdapter.ts";
+import { PromptQlAdapter } from "../src/promptql/promptqlAdapter.ts";
 import { testConfig } from "./helpers.ts";
 
 const realFetch = globalThis.fetch;
@@ -115,11 +115,4 @@ test("waiting_approval auto-declines and returns a console-approval notice", asy
   // Second tool call must be the decline.
   expect(toolCalls[1].name).toBe("respond_to_promptql_approval");
   expect(toolCalls[1].args).toEqual({ approval_id: "ap-1", decision: "decline" });
-});
-
-test("shopperRoomName produces a valid room_name", () => {
-  const name = shopperRoomName("8A895791-8BB0-430E-8DD9-2A366AB96174");
-  expect(name).toMatch(/^[a-z0-9]+([_-][a-z0-9]+)*$/u);
-  expect(name.length).toBeLessThanOrEqual(80);
-  expect(name.startsWith("sept-")).toBe(true);
 });

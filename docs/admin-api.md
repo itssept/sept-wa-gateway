@@ -1,8 +1,8 @@
 # Admin API
 
 The management API. A PromptQL project (or any admin caller) uses it to drive
-the gateway: link a WhatsApp number, register shoppers, and map chats to
-shoppers.
+the gateway: link a WhatsApp number and register shoppers. Callers work in
+shoppers and phone numbers; WhatsApp jids/lids and chat routing are internal.
 
 Base path: `/api/v1`. See the [README](../README.md) for the wider system
 overview.
@@ -30,7 +30,7 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 - Max request body size is 1 MiB (`413` if exceeded).
 - Secrets (MCP tokens, session state) are **never** returned after creation and
   never logged. The API returns only a `tokenFingerprint` (sha256).
-- Create / rotate / revoke / disable / mapping changes are recorded in
+- Shopper create / credential rotate / revoke / status changes are recorded in
   `audit_log`.
 
 ### Error shape
@@ -63,9 +63,6 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 | POST | `/api/v1/shoppers/:id/status` | Enable / disable. |
 | POST | `/api/v1/shoppers/:id/credential/rotate` | Rotate the MCP token. |
 | POST | `/api/v1/shoppers/:id/credential/revoke` | Revoke the MCP token. |
-| GET | `/api/v1/mappings` | List chat mappings. |
-| POST | `/api/v1/mappings` | Upsert a chat → shopper mapping. |
-| POST | `/api/v1/mappings/:chatJid/status` | Enable / disable a mapping. |
 | GET | `/api/v1/status` | Connection + counts (debug). |
 
 ## Connection
@@ -124,9 +121,11 @@ Stop and wipe the session so a new number can link. Returns the connection view.
 ### POST /api/v1/shoppers
 
 Register a shopper and set (or rotate) its MCP credential. **Idempotent on
-phone** — an existing shopper returns `200`, a new one returns `201`. Response
-includes the shopper and the credential's non-secret info (`tokenFingerprint`,
-never the raw token).
+phone** — an existing shopper returns `200`, a new one returns `201`. On a
+re-register the mutable fields (`name`, `roomName`) are updated to the new
+values; a disabled shopper is never implicitly re-enabled. Response includes the
+shopper and the credential's non-secret info (`tokenFingerprint`, never the raw
+token).
 
 Body:
 
@@ -134,13 +133,14 @@ Body:
 |---|---|---|---|
 | `name` | string (1–200) | yes | Shopper display name. |
 | `phone` | string | yes | Canonicalized to E.164 server-side. `422` if invalid. |
+| `roomName` | string (1–80) | yes | Caller-owned PromptQL `room_name` for this shopper. Stored verbatim and passed to PromptQL when starting the shopper's thread. The gateway does not derive it — PromptQL validates the value. |
 | `mcpToken` | string (8–4096) | yes | MCP-scoped service-account token. Stored encrypted, never returned. |
 | `serviceAccountId` | string (≤256) | no | Non-secret PromptQL service-account id for audit/attribution. |
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/shoppers \
-  -d '{"name":"Rakesh","phone":"+14155551212","mcpToken":"<mcp-scoped-token>"}'
+  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<mcp-scoped-token>"}'
 ```
 
 ### GET /api/v1/shoppers
@@ -175,37 +175,17 @@ Body:
 Revoke the active MCP token and drop any cached MCP session. `404` if the
 shopper is not found. Returns `{ "revoked": <bool> }`.
 
-## Mappings
+## Routing (no API)
 
-A mapping binds a WhatsApp chat/group jid to exactly one shopper.
+There is **no mappings API**. How an inbound WhatsApp chat resolves to a shopper
+is an internal concern of the gateway, expressed in shoppers and phone numbers —
+never in WhatsApp jids/lids, which API users do not see.
 
-### GET /api/v1/mappings
-
-List chat mappings. Returns `{ "mappings": [...] }`.
-
-### POST /api/v1/mappings
-
-Upsert a chat → shopper mapping. `422` if `shopperId` does not exist.
-
-Body:
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `chatJid` | string (3–128) | yes | The WhatsApp chat/group jid. |
-| `shopperId` | string (1–64) | yes | Must reference an existing shopper. |
-| `status` | `enabled` \| `disabled` | no | Defaults to `enabled`. |
-
-```bash
-curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
-  -X POST $BASE/api/v1/mappings \
-  -d '{"chatJid":"14155551212@s.whatsapp.net","shopperId":"<shopper-id>"}'
-```
-
-### POST /api/v1/mappings/:chatJid/status
-
-Enable or disable a mapping. `:chatJid` is URL-encoded. `404` if not found.
-
-Body: `{ "status": "enabled" | "disabled" }`
+Resolution (internal, see `src/routing/resolver.ts`): a message auto-resolves by
+the **sender's phone** (the participant in a group, the chat in a DM) to a
+registered, enabled shopper. Senders that are not registered shoppers are
+dropped. An internal chat→shopper mapping table exists for pinning specific
+chats, but it is not manageable over the API.
 
 ## Status (debug)
 

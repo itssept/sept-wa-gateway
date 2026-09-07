@@ -92,6 +92,7 @@ export const MIGRATIONS: Migration[] = [
         id            TEXT PRIMARY KEY,        -- generated shopper id (uuid)
         name          TEXT NOT NULL,
         phone_e164    TEXT NOT NULL,           -- normalized, canonical
+        room_name     TEXT NOT NULL,           -- caller-owned PromptQL room_name; gateway does not derive it
         status        TEXT NOT NULL DEFAULT 'enabled', -- enabled | disabled
         created_at    TEXT NOT NULL,
         updated_at    TEXT NOT NULL

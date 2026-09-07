@@ -87,11 +87,6 @@ const EnvSchema = z.object({
   // Overall ceiling for the blocking response wait (get_latest_promptql_thread_
   // response long-polls internally; we re-call it on `analyzing` until this).
   PROMPTQL_RESPONSE_MAX_MS: z.coerce.number().int().positive().default(180_000),
-  // Scope threads in a per-shopper room (derived room_name) vs roomless/private.
-  PROMPTQL_USE_SHOPPER_ROOM: z
-    .enum(["true", "false"])
-    .default("true")
-    .transform((v) => v === "true"),
 });
 
 export interface Config {
@@ -121,7 +116,6 @@ export interface Config {
     timeoutMs: number;
     maxRetries: number;
     responseMaxMs: number;
-    useShopperRoom: boolean;
   };
 }
 
@@ -168,7 +162,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       timeoutMs: e.PROMPTQL_MCP_TIMEOUT_MS,
       maxRetries: e.PROMPTQL_MCP_MAX_RETRIES,
       responseMaxMs: e.PROMPTQL_RESPONSE_MAX_MS,
-      useShopperRoom: e.PROMPTQL_USE_SHOPPER_ROOM,
     },
   };
   return cached;

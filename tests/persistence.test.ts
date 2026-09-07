@@ -44,7 +44,7 @@ test("gateway state survives reopening the DB file (reboot)", () => {
       const mappings = new MappingRepo(db);
       const bots = new ChatBotRepo(db);
 
-      const { shopper } = shoppers.register("Rakesh", "+14155551212");
+      const { shopper } = shoppers.register("Rakesh", "+14155551212", "rakesh-room");
       creds.setActive(shopper.id, "mcp-secret-token", { serviceAccountId: "sa-1" });
       mappings.upsert("c1", "14155551212@s.whatsapp.net", shopper.id);
       bots.upsert({
@@ -78,6 +78,7 @@ test("gateway state survives reopening the DB file (reboot)", () => {
       // Shopper + its still-decryptable MCP token recovered.
       const shopper = shoppers.getByPhone("+14155551212");
       expect(shopper).not.toBeNull();
+      expect(shopper!.roomName).toBe("rakesh-room");
       expect(creds.getActiveToken(shopper!.id)).toBe("mcp-secret-token");
 
       // Mapping + per-chat bot thread recovered.

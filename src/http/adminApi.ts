@@ -8,13 +8,15 @@
  *   POST   /api/v1/shoppers/:id/status              enable/disable
  *   POST   /api/v1/shoppers/:id/credential/rotate   rotate MCP token
  *   POST   /api/v1/shoppers/:id/credential/revoke   revoke MCP token
- *   GET    /api/v1/mappings                         list mappings
- *   POST   /api/v1/mappings                         upsert chat->shopper mapping
- *   POST   /api/v1/mappings/:chatJid/status         enable/disable a mapping
  *   GET    /api/v1/status                           connection + counts (debug)
  *
  * Every /api/v1 route requires the admin token (constant-time). Bodies are
  * validated with Zod. Secrets are never returned after creation, never logged.
+ *
+ * NOTE: chat->shopper mappings are an INTERNAL routing mechanism (see
+ * `src/routing/resolver.ts`) and are deliberately NOT exposed over the API —
+ * API users work in shoppers + phone numbers, not WhatsApp jids/lids. The
+ * `MappingRepo` + `chat_mapping` table remain for internal use.
  */
 
 import type { z } from "zod";
@@ -25,8 +27,6 @@ import {
   CreateShopper,
   RotateCredential,
   SetShopperStatus,
-  UpsertMapping,
-  SetMappingStatus,
   LinkConnection,
 } from "./schemas.ts";
 import { canonicalizeE164 } from "../util.ts";
@@ -124,9 +124,6 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
       if (resource === "shoppers") {
         return await handleShoppers(req, segments.slice(3), ctx);
       }
-      if (resource === "mappings") {
-        return await handleMappings(req, segments.slice(3), ctx);
-      }
       if (resource === "connection") {
         return await handleConnection(req, segments.slice(3), ctx, connection);
       }
@@ -223,11 +220,11 @@ async function handleShoppers(
   if (rest.length === 0 && req.method === "POST") {
     const parsed = await readJson(req, CreateShopper);
     if (!parsed.ok) return parsed.response;
-    const { name, phone, mcpToken, serviceAccountId } = parsed.data;
+    const { name, phone, roomName, mcpToken, serviceAccountId } = parsed.data;
     const canonical = canonicalizeE164(phone);
     if (!canonical) return err(422, "phone is not a valid E.164 number");
 
-    const { shopper, created } = ctx.shoppers.register(name, canonical);
+    const { shopper, created } = ctx.shoppers.register(name, canonical, roomName);
     // Set (or rotate) the shopper's MCP credential.
     const cred = ctx.credentials.setActive(shopper.id, mcpToken, {
       serviceAccountId: serviceAccountId ?? null,
@@ -310,53 +307,3 @@ async function handleShoppers(
   return err(404, "not found");
 }
 
-async function handleMappings(
-  req: Request,
-  rest: string[],
-  ctx: AppContext,
-): Promise<Response> {
-  // GET /api/v1/mappings
-  if (rest.length === 0 && req.method === "GET") {
-    return json({ mappings: ctx.mappings.list() });
-  }
-
-  // POST /api/v1/mappings
-  if (rest.length === 0 && req.method === "POST") {
-    const parsed = await readJson(req, UpsertMapping);
-    if (!parsed.ok) return parsed.response;
-    const { chatJid, shopperId, status } = parsed.data;
-    if (!ctx.shoppers.getById(shopperId)) return err(422, "shopperId does not exist");
-    const mapping = ctx.mappings.upsert(
-      ctx.config.connectionId,
-      chatJid,
-      shopperId,
-      status,
-    );
-    ctx.audit.record("mapping.upsert", {
-      subjectType: "mapping",
-      subjectId: chatJid,
-      detail: { shopperId, status },
-    });
-    return json({ mapping });
-  }
-
-  // POST /api/v1/mappings/:chatJid/status
-  if (rest.length === 2 && rest[1] === "status" && req.method === "POST") {
-    const chatJid = decodeURIComponent(rest[0]);
-    const parsed = await readJson(req, SetMappingStatus);
-    if (!parsed.ok) return parsed.response;
-    const mapping = ctx.mappings.setStatus(
-      ctx.config.connectionId,
-      chatJid,
-      parsed.data.status,
-    );
-    if (!mapping) return err(404, "mapping not found");
-    ctx.audit.record(
-      parsed.data.status === "disabled" ? "mapping.disable" : "mapping.enable",
-      { subjectType: "mapping", subjectId: chatJid },
-    );
-    return json({ mapping });
-  }
-
-  return err(404, "not found");
-}

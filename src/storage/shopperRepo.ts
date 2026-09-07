@@ -12,6 +12,7 @@ interface Row {
   id: string;
   name: string;
   phone_e164: string;
+  room_name: string;
   status: string;
   created_at: string;
   updated_at: string;
@@ -22,6 +23,7 @@ function toShopper(r: Row): Shopper {
     id: r.id,
     name: r.name,
     phoneE164: r.phone_e164,
+    roomName: r.room_name,
     status: r.status as ShopperStatus,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -36,27 +38,35 @@ export class ShopperRepo {
    * MUST already be canonicalized by the caller. Returns the shopper and whether
    * it was newly created (so the API can distinguish 201 from 200).
    */
-  register(name: string, phoneE164: string): { shopper: Shopper; created: boolean } {
+  register(
+    name: string,
+    phoneE164: string,
+    roomName: string,
+  ): { shopper: Shopper; created: boolean } {
     const existing = this.getByPhone(phoneE164);
     if (existing) {
-      // Idempotent: keep the original registration. Update the display name if
-      // it changed, but never resurrect a disabled shopper implicitly.
-      if (existing.name !== name) {
-        this.db.run("UPDATE shopper SET name = ?, updated_at = ? WHERE id = ?", [
-          name,
-          nowIso(),
-          existing.id,
-        ]);
-        return { shopper: { ...existing, name, updatedAt: nowIso() }, created: false };
+      // Idempotent: keep the original registration. Update the mutable fields
+      // (display name, room name) if they changed, but never resurrect a
+      // disabled shopper implicitly.
+      if (existing.name !== name || existing.roomName !== roomName) {
+        const ts = nowIso();
+        this.db.run(
+          "UPDATE shopper SET name = ?, room_name = ?, updated_at = ? WHERE id = ?",
+          [name, roomName, ts, existing.id],
+        );
+        return {
+          shopper: { ...existing, name, roomName, updatedAt: ts },
+          created: false,
+        };
       }
       return { shopper: existing, created: false };
     }
     const id = uuid();
     const ts = nowIso();
     this.db.run(
-      `INSERT INTO shopper (id, name, phone_e164, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'enabled', ?, ?)`,
-      [id, name, phoneE164, ts, ts],
+      `INSERT INTO shopper (id, name, phone_e164, room_name, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'enabled', ?, ?)`,
+      [id, name, phoneE164, roomName, ts, ts],
     );
     return { shopper: this.getById(id)!, created: true };
   }

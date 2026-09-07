@@ -72,8 +72,19 @@ Verified against the live MCP server. Details in [README.md](README.md#promptql-
 - **Secrets are encrypted at rest** (Baileys session state, per-shopper MCP
   tokens) under `DATA_ENCRYPTION_KEY`. **Never log or return a raw secret** —
   the API returns only a `tokenFingerprint`. `.env` is git-ignored.
-- Shopper/service-account identity is **never** taken from a WhatsApp message —
-  resolve it from the authenticated gateway mapping.
+- Shopper identity resolves in two steps (`src/routing/resolver.ts`): an internal
+  chat->shopper mapping wins if present; otherwise the gateway **auto-resolves by
+  the message SENDER's phone** (participant in a group, chat in a DM) to a
+  registered, enabled shopper. **PILOT OVERRIDE:** the sender-phone fallback
+  deliberately takes identity from the WhatsApp message — the opposite of the
+  original "never trust the message" rule — accepted for the pilot because
+  WhatsApp verifies a DM account owns its number. Unregistered senders (including
+  every other participant in a group) still fall through to a silent drop
+  (`unregistered_sender`). The mapping table (`MappingRepo` + `chat_mapping`) is
+  an **internal mechanism only** — there is deliberately NO mappings API, because
+  API users work in shoppers + phone numbers, not WhatsApp jids/lids. If a
+  chat-pinning workflow is ever needed, populate mappings internally, not over
+  `/api/v1`.
 - `connection_id` is a routing key, not an authorization boundary.
 
 ## Connection management & deploy
