@@ -14,6 +14,10 @@ FROM oven/bun:1.2 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Link the GHCR package to this repo (inherits repo visibility/permissions,
+# shows on the repo's Packages panel).
+LABEL org.opencontainers.image.source="https://github.com/hasura/sept-wa-gateway"
+
 # App + resolved node_modules.
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json ./

@@ -1,0 +1,153 @@
+name: Publish image
+
+# Publishes a multi-arch (amd64 + arm64) gateway image to GitHub Container
+# Registry (GHCR).
+#
+# Triggers:
+#   - git tag push matching v<sem-ver>  (e.g. v1.2.3, v1.2.3-rc1)
+#   - manual dispatch on any branch     (Actions tab → Run workflow)
+#
+# Strategy: each arch builds NATIVELY on its own runner (no QEMU emulation),
+# pushing by digest only. A final job merges the per-arch digests into one
+# multi-arch manifest under the real tags.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"        # v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-*"      # v1.2.3-rc1, pre-releases
+  workflow_dispatch:
+
+# Serialise publishes for the same ref; do not cancel a push mid-flight.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # <owner>/<repo>, lowercased by the action
+
+jobs:
+  # Build each architecture on its native runner and push by digest.
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write        # required to push to GHCR
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A filesystem-safe slug for artifact names, e.g. linux/amd64 -> linux-amd64.
+      - name: Prepare platform slug
+        id: slug
+        run: echo "value=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
+      - name: Docker labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build for this single native platform and push by digest only
+      # (no tags here — the merge job attaches the tags).
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.slug.outputs.value }}
+          cache-to: type=gha,mode=max,scope=${{ steps.slug.outputs.value }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # Export the pushed digest so the merge job can reference it.
+      # Strip the "sha256:" prefix so the filename is just the hex digest.
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ steps.slug.outputs.value }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine the per-arch digests into one multi-arch manifest under the tags.
+  merge:
+    name: merge manifest
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      # Derive tags. On a tag push we get the version tag + `latest`;
+      # on manual dispatch we get a branch-based tag and the short SHA.
+      - name: Docker tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Create one manifest list from the pushed digests, tagged per meta output.
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
