@@ -30,6 +30,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxPendingSendsPerConnection: 100,
     groupMetaTtlMs: 3_600_000,
     messageRetentionDays: 90,
+    captureGroupHistory: true,
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

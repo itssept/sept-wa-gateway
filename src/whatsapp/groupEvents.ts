@@ -1,6 +1,6 @@
 /** Validated Baileys identity, mention and membership boundaries. */
 import { z } from "zod";
-import { normalizeMessageContent, type WAMessage } from "baileys";
+import { normalizeMessageContent, proto, type WAMessage } from "baileys";
 
 const Jid = z.string().regex(/^[^@\s]+@[^@\s]+$/);
 const OwnUser = z.object({ id: Jid, lid: Jid.optional() });
@@ -73,4 +73,75 @@ export function selfGroupUpserts(payload: unknown, user: unknown): string[] {
   return groups.filter((group) => group.participants.some((p) =>
     [p.id, p.lid, p.phoneNumber].some((jid) => jid && own.has(bareJid(jid))),
   )).map((group) => group.id);
+}
+
+// Baileys 7.0.0-rc14: Types/Events.d.ts. isLatest means the first sync,
+// not the last chunk. There is no "joined group" flag on this payload.
+const HistoryBatch = z.object({
+  chats: z.array(z.object({ id: Jid }).passthrough()),
+  contacts: z.array(z.object({ id: Jid }).passthrough()),
+  messages: z.array(z.unknown()),
+  isLatest: z.boolean().optional(),
+  progress: z.number().min(0).max(100).nullish(),
+  syncType: z.nativeEnum(proto.HistorySync.HistorySyncType).nullish(),
+  chunkOrder: z.number().int().nonnegative().nullish(),
+  peerDataRequestSessionId: z.string().nullish(),
+});
+const HistoryTimestamp = z.union([
+  z.number().int().nonnegative().safe(),
+  z.object({ low: z.number().int(), high: z.number().int(), unsigned: z.boolean() }),
+]);
+const HistoryContentNode = z.object({
+  text: z.string().nullish(),
+  caption: z.string().nullish(),
+  mimetype: z.string().nullish(),
+  fileLength: z.union([HistoryTimestamp, z.string().regex(/^\d+$/)]).nullish(),
+  url: z.string().nullish(),
+  directPath: z.string().nullish(),
+  mediaKey: z.instanceof(Uint8Array).nullish(),
+  contextInfo: z.object({ mentionedJid: z.array(Jid).nullish() }).passthrough().nullish(),
+}).passthrough();
+const HistoryContent: z.ZodType<unknown> = z.lazy(() => z.object({
+  conversation: z.string().nullish(),
+  extendedTextMessage: HistoryContentNode.nullish(),
+  imageMessage: HistoryContentNode.nullish(),
+  videoMessage: HistoryContentNode.nullish(),
+  audioMessage: HistoryContentNode.nullish(),
+  documentMessage: HistoryContentNode.nullish(),
+  stickerMessage: HistoryContentNode.nullish(),
+  ephemeralMessage: z.object({ message: HistoryContent.nullish() }).passthrough().nullish(),
+  viewOnceMessage: z.object({ message: HistoryContent.nullish() }).passthrough().nullish(),
+  viewOnceMessageV2: z.object({ message: HistoryContent.nullish() }).passthrough().nullish(),
+  viewOnceMessageV2Extension: z.object({ message: HistoryContent.nullish() }).passthrough().nullish(),
+  documentWithCaptionMessage: z.object({ message: HistoryContent.nullish() }).passthrough().nullish(),
+}).passthrough());
+const HistoryEnvelope = z.object({
+  key: z.object({
+    remoteJid: GroupId,
+    id: z.string().min(1),
+    participant: Jid.nullish(),
+    participantAlt: Jid.nullish(),
+    remoteJidAlt: Jid.nullish(),
+    fromMe: z.boolean().nullish(),
+  }).passthrough(),
+  messageTimestamp: HistoryTimestamp,
+  message: HistoryContent.nullish(),
+  pushName: z.string().nullish(),
+}).passthrough();
+
+export function parseHistoryBatch(payload: unknown): z.infer<typeof HistoryBatch> {
+  return HistoryBatch.parse(payload);
+}
+
+/** Validate consumed fields without stripping media keys, extensions or Longs. */
+export function parseHistoryMessage(value: unknown): WAMessage | null {
+  try {
+    HistoryEnvelope.parse(value);
+    const message = value as WAMessage;
+    const seconds = Number(message.messageTimestamp);
+    if (!Number.isSafeInteger(seconds * 1000) || seconds < 0) return null;
+    return message;
+  } catch {
+    return null;
+  }
 }

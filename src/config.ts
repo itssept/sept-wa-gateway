@@ -83,6 +83,10 @@ const EnvSchema = z.object({
     .default(100),
   WHATSAPP_GROUP_META_TTL_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
 
+  // Capture history shared after the linked account joins a group.
+  WHATSAPP_CAPTURE_GROUP_HISTORY: z.enum(["true", "false"]).default("true")
+    .transform((value) => value === "true"),
+
   // Retention.
   WHATSAPP_MESSAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
 
@@ -123,6 +127,7 @@ export interface Config {
   maxPendingSendsPerConnection: number;
   groupMetaTtlMs: number;
   messageRetentionDays: number;
+  captureGroupHistory: boolean;
 
   mcp: {
     /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
@@ -168,6 +173,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxPendingSendsPerConnection: e.WHATSAPP_MAX_PENDING_SENDS_PER_CONNECTION,
     groupMetaTtlMs: e.WHATSAPP_GROUP_META_TTL_MS,
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
+    captureGroupHistory: e.WHATSAPP_CAPTURE_GROUP_HISTORY,
 
     mcp: {
       endpoint: e.PROMPTQL_MCP_URL,

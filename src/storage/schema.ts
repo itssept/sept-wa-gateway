@@ -246,4 +246,19 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 7,
+    name: "group_history_capture",
+    sql: /* sql */ `
+      ALTER TABLE whatsapp_message_store ADD COLUMN is_history INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE whatsapp_message_store ADD COLUMN relayed_at TEXT;
+      -- Original transport envelope, including media retrieval keys, encrypted.
+      -- Downloaded media bytes are never stored here.
+      ALTER TABLE whatsapp_message_store ADD COLUMN history_message_encrypted BLOB;
+      ALTER TABLE whatsapp_message_store ADD COLUMN history_media_status TEXT NOT NULL DEFAULT 'none';
+      CREATE INDEX ix_msg_store_unrelayed_history
+        ON whatsapp_message_store (connection_id, chat_jid, ts)
+        WHERE is_history = 1 AND relayed_at IS NULL;
+    `,
+  },
 ];

@@ -18,6 +18,7 @@
 
 import makeWASocket, {
   Browsers,
+  BufferJSON,
   generateMessageIDV2,
   normalizeMessageContent,
   DisconnectReason,
@@ -26,7 +27,7 @@ import makeWASocket, {
   type WASocket,
 } from "baileys";
 import { z } from "zod";
-import { ownJids, mentionsSelf, selfParticipantUpdate, selfGroupUpserts, type SelfMembershipEvent } from "./groupEvents.ts";
+import { ownJids, mentionsSelf, selfParticipantUpdate, selfGroupUpserts, parseHistoryBatch, parseHistoryMessage, type SelfMembershipEvent } from "./groupEvents.ts";
 import { OutboundLog } from "../storage/outboundLog.ts";
 import { Boom } from "@hapi/boom";
 import type { Database } from "bun:sqlite";
@@ -35,9 +36,11 @@ import { useSqliteAuthState, type AuthStateHandle } from "./authState.ts";
 import { AntiBanQueue, PacingProfileSchema, type PacingProfile, type SendContext } from "./antiBan.ts";
 import { GroupMetaStore } from "./groupMeta.ts";
 import { rootLogger, type Logger } from "../logger.ts";
-import type { MessageStore } from "../storage/messageStore.ts";
+import { encrypt, decryptToString } from "../crypto.ts";
+import type { StoredHistoryMessage, MessageStore } from "../storage/messageStore.ts";
 import {
   classifyMessage,
+  hasMedia,
   TransientMediaDownloader,
   type DownloadedMedia,
   type MediaStatus,
@@ -74,7 +77,15 @@ export interface InboundMessage {
   mentionsSelf: boolean;
 }
 
+export interface HistoryBatchEvent extends SelfMembershipEvent {
+  /** Newly captured rows only, excluding any message already stored live/history. */
+  count: number;
+}
+
 export interface SocketHooks {
+  /** One notification per group in a history batch, after persistence. No live hook.
+   * Awaited before the next queued input so replay can finish before later live work. */
+  onHistoryBatch?: (event: HistoryBatchEvent) => void | Promise<void>;
   onSelfRemoved?: (event: SelfMembershipEvent) => void;
   onSelfAdded?: (event: SelfMembershipEvent) => void;
   /** Called for each captured inbound message (already persisted). */
@@ -112,6 +123,7 @@ export class WhatsAppConnection {
   private readonly log: Logger;
   private readonly outboundLog: OutboundLog;
   private readonly groupEpochs = new Map<string, number>();
+  private readonly pendingHistoryGroups = new Set<string>();
   private inboundQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -248,6 +260,7 @@ export class WhatsAppConnection {
     this.stop();
     // Wipe persisted session so pairing starts clean (never carry stale creds).
     this.live.auth.clear();
+    this.pendingHistoryGroups.clear();
     this.live.auth = useSqliteAuthState(
       this.db,
       this.config.connectionId,
@@ -273,6 +286,7 @@ export class WhatsAppConnection {
   unlink(): void {
     this.stop();
     this.live.auth.clear();
+    this.pendingHistoryGroups.clear();
     this.live.status = "logged_out";
     this.live.linkedAtMs = null;
     this.live.pairingCode = undefined;
@@ -342,6 +356,8 @@ export class WhatsAppConnection {
         });
     });
 
+    sock.ev.on("messaging-history.set", (history) => this.queueHistoryBatch(history, sock));
+
     // groups.update / group-participants.update → keep the group-metadata cache
     // fresh so cachedGroupMetadata stays warm (anti-ban).
     sock.ev.on("groups.update", async (updates) => {
@@ -390,12 +406,127 @@ export class WhatsAppConnection {
     this.groupEpochs.set(groupJid, (this.groupEpochs.get(groupJid) ?? 0) + 1);
     const event = { connectionId: this.config.connectionId, groupJid };
     if (action === "remove") {
+      this.pendingHistoryGroups.delete(groupJid);
       this.groups.remove(event.connectionId, groupJid);
       this.hooks.onSelfRemoved?.(event);
     } else {
+      if (this.config.captureGroupHistory) this.pendingHistoryGroups.add(groupJid);
       this.groups.allowFetch(event.connectionId, groupJid);
       this.hooks.onSelfAdded?.(event);
     }
+  }
+
+  private queueHistoryBatch(payload: unknown, sock: WASocket): void {
+    if (!this.config.captureGroupHistory) return;
+    const epochs = new Map(this.groupEpochs);
+    this.inboundQueue = this.inboundQueue
+      .then(() => this.onHistoryBatch(payload, sock, epochs))
+      .catch((err) => this.log.error("history batch handling failed", { err }));
+  }
+
+  private async onHistoryBatch(
+    payload: unknown,
+    sock: WASocket,
+    epochs = new Map(this.groupEpochs),
+  ): Promise<void> {
+    if (!this.config.captureGroupHistory) return;
+    let batch;
+    try {
+      batch = parseHistoryBatch(payload);
+    } catch {
+      this.log.warn("invalid history batch");
+      return;
+    }
+    const grouped = new Map<string, WAMessage[]>();
+    for (const value of batch.messages) {
+      const message = parseHistoryMessage(value);
+      if (!message) {
+        // Do not log validation input: it contains message bodies and media keys.
+        this.log.debug("history entry skipped: invalid or not a group message");
+        continue;
+      }
+      const groupJid = message.key.remoteJid!;
+      if (!this.pendingHistoryGroups.has(groupJid)) continue;
+      if ((epochs.get(groupJid) ?? 0) !== (this.groupEpochs.get(groupJid) ?? 0)) continue;
+      const messages = grouped.get(groupJid) ?? [];
+      messages.push(message);
+      grouped.set(groupJid, messages);
+    }
+
+    for (const [groupJid, messages] of grouped) {
+      // A previous group's async replay may have overlapped a removal/re-add.
+      if (!this.pendingHistoryGroups.has(groupJid) ||
+        (epochs.get(groupJid) ?? 0) !== (this.groupEpochs.get(groupJid) ?? 0)) continue;
+      // rc14 flattens newest-first conversation.messages and drops msgOrderId.
+      // Stable sort keeps WhatsApp's order for equal-second timestamps after
+      // reversing the source order; rowid retains that tie order on replay.
+      messages.reverse().sort((a, b) => Number(a.messageTimestamp) - Number(b.messageTimestamp));
+      let count = 0;
+      for (const message of messages) {
+        const parsed = this.parseMessage(message, sock.user);
+        if (!parsed) continue;
+        parsed.ts = Number(message.messageTimestamp) * 1000;
+        const normalized = { ...message, message: normalizeMessageContent(message.message) };
+        parsed.msgType = classifyMessage(normalized);
+        const envelope = encrypt(JSON.stringify({ ...message, messageTimestamp: Number(message.messageTimestamp) }, BufferJSON.replacer), this.config.dataEncryptionKey);
+        if (!this.messages.captureHistory(parsed, envelope, hasMedia(normalized) ? "pending" : "none")) continue;
+        count += 1;
+        // Gateway replies already exist in the bot. Retain them for capture-all
+        // bookkeeping but never return them as unrelayed history.
+        if (parsed.fromMe && this.outboundLog.isGatewayMessage(parsed.connectionId, groupJid, parsed.messageId)) {
+          this.messages.markRelayed(parsed.connectionId, groupJid, parsed.messageId);
+        }
+      }
+      // No media allocation during capture. Replay downloads each retained
+      // reference on demand through prepareHistoryMessage(), then releases it.
+      // isLatest marks a first sync, so only progress=100 (or an unchunked event)
+      // closes this join's capture window.
+      if (batch.progress === 100 || (batch.progress == null && batch.chunkOrder == null)) {
+        this.pendingHistoryGroups.delete(groupJid);
+      }
+      try {
+        await this.hooks.onHistoryBatch?.({ connectionId: this.config.connectionId, groupJid, count });
+      } catch {
+        // Rows stay unrelayed and queryable even if the replay consumer fails.
+        this.log.error("history batch callback failed", { groupJid: maskJid(groupJid) });
+      }
+    }
+  }
+
+  /** Replay helper: decode retained metadata and download media transiently.
+   * This never posts or triggers anything. The caller must release media after
+   * its single-message relay and markRelayed only after acceptance. */
+  async prepareHistoryMessage(row: StoredHistoryMessage): Promise<InboundMessage | null> {
+    z.object({
+      connectionId: z.literal(this.config.connectionId),
+      chatJid: z.string().regex(/^[^@\s]+@g\.us$/),
+      messageId: z.string().min(1),
+      historyMessageEncrypted: z.instanceof(Buffer),
+    }).parse(row);
+    const value: unknown = JSON.parse(decryptToString(row.historyMessageEncrypted, this.config.dataEncryptionKey), BufferJSON.reviver);
+    const message = parseHistoryMessage(value);
+    if (!message || message.key.remoteJid !== row.chatJid || message.key.id !== row.messageId) {
+      throw new Error("Invalid stored history message");
+    }
+    const parsed = this.parseMessage(message);
+    if (!parsed) return null;
+    parsed.ts = row.ts;
+    parsed.senderJid = row.senderJid;
+    parsed.senderPhoneE164 = row.senderPhoneE164;
+    parsed.mentionsSelf = false;
+    const normalized = { ...message, message: normalizeMessageContent(message.message) };
+    parsed.msgType = classifyMessage(normalized);
+    try {
+      const result = this.live.sock
+        ? await this.media.download(normalized, this.live.sock)
+        : { status: hasMedia(normalized) ? "failed" as const : "none" as const, media: null };
+      parsed.mediaStatus = result.status;
+      parsed.media = result.media;
+    } catch {
+      parsed.mediaStatus = "failed";
+    }
+    this.messages.setHistoryMediaStatus(row.connectionId, row.chatJid, row.messageId, parsed.mediaStatus);
+    return parsed;
   }
 
   private onConnectionUpdate(u: {
