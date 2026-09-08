@@ -7,6 +7,15 @@ WhatsApp number, and register shoppers. Callers work in shoppers and phone numbe
 Base path: `/api/v1`. See the [README](../README.md) for the wider system
 overview.
 
+## Setup order
+
+1. Call `POST /api/v1/setup` with the Client SA MCP token and common room name.
+2. Call `POST /api/v1/connection/link` and complete WhatsApp pairing.
+3. Call `POST /api/v1/shoppers` to register shoppers and their credentials.
+
+Linking and shopper registration return `409` until gateway setup is complete.
+Connection status and unlink remain available before setup, with admin auth.
+
 ## Authentication
 
 Every `/api/v1/*` endpoint requires the **admin token**
@@ -44,7 +53,7 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 | 400 | Invalid JSON body. |
 | 401 | Missing or wrong admin token. |
 | 404 | Unknown route or resource. |
-| 409 | Gateway setup is required before shopper registration. |
+| 409 | Gateway setup is required before linking or shopper registration. |
 | 413 | Request body too large. |
 | 422 | Validation failed (`issues` array) or invalid E.164 phone. |
 | 500 | Internal error. |
@@ -71,7 +80,7 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 
 ### POST /api/v1/setup
 
-Set both gateway-wide inputs before registering the first shopper. Returns
+Set both gateway-wide inputs before linking WhatsApp or registering shoppers. Returns
 `200`. Calling it again replaces both values atomically, including the Client
 SA token. This endpoint does not accept other gateway configuration.
 
@@ -132,6 +141,13 @@ short-lived and only present while pairing.
 Returns the current connection view (status + pairing code).
 
 ### POST /api/v1/connection/link
+
+Gateway setup must be complete or this returns `409` without starting pairing
+or changing the existing session:
+
+```json
+{ "error": "gateway setup required: POST /api/v1/setup with clientMcpToken and commonRoomName" }
+```
 
 Start pairing for a number. **Wipes the existing session.** Returns `202`; the
 pairing code is issued asynchronously a moment later, so poll

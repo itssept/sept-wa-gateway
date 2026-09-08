@@ -200,6 +200,9 @@ async function handleConnection(
 
   // POST /api/v1/connection/link
   if (rest.length === 1 && rest[0] === "link" && req.method === "POST") {
+    if (!ctx.gatewaySettings.getStatus().setupComplete) {
+      return err(409, "gateway setup required: POST /api/v1/setup with clientMcpToken and commonRoomName");
+    }
     const parsed = await readJson(req, LinkConnection);
     if (!parsed.ok) return parsed.response;
     const canonical = canonicalizeE164(parsed.data.phone);
