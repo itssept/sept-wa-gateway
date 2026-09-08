@@ -1,24 +1,4 @@
-/**
- * Resolve a WhatsApp chat jid to exactly one enabled shopper with an active MCP
- * credential. Rejection is explicit and typed so the caller can log the reason
- * and silently drop (no WhatsApp reply — respects anti-ban / no unsolicited).
- *
- * Resolution order:
- *   1. In DMs, an explicit chat->shopper mapping wins, if present.
- *      Groups ignore mappings: a tag always runs as its sender.
- *   2. Otherwise, auto-resolve by the message SENDER's phone number: a DM's
- *      sender is the chat; a group message's sender is the participant. If that
- *      number is a registered, enabled shopper with an active credential, route
- *      as them.
- *
- * NOTE (trust model): step 2 takes shopper identity from the WhatsApp message
- * (the sender's number), which the manual-mapping model deliberately avoided.
- * This is an intentional override for the pilot — see AGENTS.md / README. It is
- * safe-ish because WhatsApp verifies the account owns its number; unregistered
- * senders cannot trigger the bot. Active groups can still relay their messages
- * as context, using the last tagger's credential.
- */
-
+/** Sender identity and group owner selection. Ownership never follows tags. */
 import { isGroupJid } from "../util.ts";
 import type { ResolveResult } from "../domain/types.ts";
 import type { Shopper } from "../domain/types.ts";
@@ -60,9 +40,23 @@ export class ShopperResolver {
     return { ok: false, reason: "unmapped" };
   }
 
-  /** Relays act as the last tagger, not the unregistered message author. */
+  /** Resolve a stored owner for responding on their behalf. */
   resolveShopper(shopperId: string): ResolveResult {
     return this.finalize(this.shoppers.getById(shopperId), "sender");
+  }
+
+  registered(phone: string | null | undefined): Shopper | null {
+    const shopper = phone ? this.shoppers.getByPhone(phone) : null;
+    return shopper?.status === "enabled" ? shopper : null;
+  }
+
+  byId(id: string | null): Shopper | null {
+    return id ? this.shoppers.getById(id) : null;
+  }
+
+  groupOwner(phones: string[], addedByPhone: string | null): Shopper | null {
+    const members = this.shoppers.list().filter((s) => s.status === "enabled" && phones.includes(s.phoneE164));
+    return members.find((s) => s.phoneE164 === addedByPhone) ?? members[0] ?? null;
   }
 
   /** Shared enabled + has-active-credential gate for a resolved shopper. */

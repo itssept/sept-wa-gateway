@@ -101,10 +101,24 @@ export type BotResponse =
   | { status: "declined_approval"; message: string }
   | { status: "failed"; message: string };
 
+export const PostingIdentitySchema = z.union([
+  z.object({ role: z.literal("client") }).strict(),
+  z.object({ role: z.enum(["shopper", "pa"]), shopperId: z.string().min(1) }).strict(),
+]);
+export type PostingIdentity = z.infer<typeof PostingIdentitySchema>;
+// String callers are the shopper identity, including the discovery CLI.
+export type IdentityInput = PostingIdentity | string;
+
+function postingIdentity(input: IdentityInput): PostingIdentity {
+  return PostingIdentitySchema.parse(typeof input === "string"
+    ? { role: "shopper", shopperId: input } : input);
+}
+
 export interface AdapterDeps {
   config: Config;
   /** Resolve a shopper's MCP-scoped token at call time. Never cached in cleartext. */
-  getToken: (shopperId: string) => string | null;
+  getToken: (shopperId: string, role: "shopper" | "pa") => string | null;
+  getClientToken?: () => string | null;
   /** Optional structured logger; defaults to the process root logger. */
   log?: Logger;
 }
@@ -117,12 +131,18 @@ export class PromptQlAdapter {
     this.log = deps.log ?? rootLogger.child({ component: "promptql" });
   }
 
-  private session(shopperId: string): McpSession {
-    const cached = this.sessions.get(shopperId);
-    if (cached) return cached;
-    const token = this.deps.getToken(shopperId);
+  private session(input: IdentityInput): McpSession {
+    const identity = postingIdentity(input);
+    const key = JSON.stringify(identity.role === "client" ? ["client"] : [identity.shopperId, identity.role]);
+    // Check revocation at every lookup, including response polling.
+    const token = identity.role === "client"
+      ? this.deps.getClientToken?.()
+      : this.deps.getToken(identity.shopperId, identity.role);
+    if (!token) this.sessions.delete(key);
+    const cached = this.sessions.get(key);
+    if (token && cached) return cached;
     if (!token) {
-      throw new McpError(`no active MCP credential for shopper ${shopperId}`, "protocol");
+      throw new McpError(`no active MCP credential for ${identity.role} identity`, "protocol");
     }
     const mcp = this.deps.config.mcp;
     if (!mcp.endpoint) throw new McpError("PROMPTQL MCP endpoint not configured", "protocol");
@@ -136,17 +156,18 @@ export class PromptQlAdapter {
       },
       token,
     );
-    this.sessions.set(shopperId, session);
+    this.sessions.set(key, session);
     return session;
   }
 
   /** Drop a shopper's cached session (after credential rotation/revoke). */
-  invalidate(shopperId: string): void {
-    this.sessions.delete(shopperId);
+  invalidate(input: IdentityInput): void {
+    const identity = postingIdentity(input);
+    this.sessions.delete(JSON.stringify(identity.role === "client" ? ["client"] : [identity.shopperId, identity.role]));
   }
 
   /** Discovery: list the tools this shopper's session can see. */
-  async listTools(shopperId: string) {
+  async listTools(shopperId: IdentityInput) {
     return this.session(shopperId).listTools();
   }
 
@@ -156,7 +177,7 @@ export class PromptQlAdapter {
    * thread in that room (must satisfy the PromptQL room_name pattern).
    */
   async ask(
-    shopperId: string,
+    shopperId: IdentityInput,
     input: {
       query: string;
       threadId?: string | null;
@@ -202,15 +223,15 @@ export class PromptQlAdapter {
    * auto-declines every pending approval and returns a declined_approval result.
    */
   async waitForResponse(
-    shopperId: string,
+    shopperId: IdentityInput,
     ask: AskResult,
     deadlineMs: number,
   ): Promise<BotResponse> {
-    const session = this.session(shopperId);
     const waitArgs: Record<string, unknown> = { thread_id: ask.threadId };
     if (ask.threadEventId) waitArgs.thread_event_id = ask.threadEventId;
 
     while (Date.now() < deadlineMs) {
+      const session = this.session(shopperId);
       const result = await session.callTool(TOOL_WAIT, waitArgs);
       const sc = (result.structured ?? {}) as {
         status?: string;

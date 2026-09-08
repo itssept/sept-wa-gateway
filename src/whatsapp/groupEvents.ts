@@ -53,18 +53,19 @@ export function mentionsSelf(message: WAMessage, user: unknown): boolean {
 export interface SelfMembershipEvent {
   connectionId: string;
   groupJid: string;
+  addedByJid?: string | null;
 }
 
 export function selfParticipantUpdate(
   payload: unknown,
   user: unknown,
-): { groupJid: string; action: "add" | "remove" } | null {
+): { groupJid: string; action: "add" | "remove"; addedByJid?: string | null } | null {
   const update = ParticipantUpdate.parse(payload);
   if (update.action !== "add" && update.action !== "remove") return null;
   const own = ownJids(user);
   if (!update.participants.some((p) => [p.id, p.lid, p.phoneNumber]
     .some((jid) => jid && own.has(bareJid(jid))))) return null;
-  return { groupJid: update.id, action: update.action };
+  return { groupJid: update.id, action: update.action, ...(update.author ? { addedByJid: bareJid(update.author) } : {}) };
 }
 
 export function selfGroupUpserts(payload: unknown, user: unknown): string[] {
@@ -95,6 +96,8 @@ const HistoryContentNode = z.object({
   text: z.string().nullish(),
   caption: z.string().nullish(),
   mimetype: z.string().nullish(),
+  fileName: z.string().nullish(),
+  ptt: z.boolean().nullish(),
   fileLength: z.union([HistoryTimestamp, z.string().regex(/^\d+$/)]).nullish(),
   url: z.string().nullish(),
   directPath: z.string().nullish(),

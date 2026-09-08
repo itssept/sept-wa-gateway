@@ -1,39 +1,45 @@
-/**
- * Group activation is opt-in by a registered shopper's tag, with no backfill.
- * Once active, context-only messages are relayed without running the bot.
- * DMs keep their existing routing and transient file delivery.
- */
-import type { InboundMessage } from "../whatsapp/socket.ts";
+/** Per-chat submission FIFO. Identity is per post; bot ownership is permanent. */
+import { z } from "zod";
+import type { InboundMessage, HistoryBatchEvent, RoutingGroup } from "../whatsapp/socket.ts";
+import type { SelfMembershipEvent } from "../whatsapp/groupEvents.ts";
 import type { ShopperResolver } from "./resolver.ts";
 import {
-  PromptQlAdapter,
-  type PromptQlFileInput,
+  AskSubmissionError, promptQlFileFromMedia,
+  type PromptQlAdapter, type PromptQlFileInput, type PostingIdentity, type AskResult,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
-import type { ChatBotRepo } from "../storage/chatBotRepo.ts";
+import type { ChatBotRepo, ChatBot } from "../storage/chatBotRepo.ts";
+import type { MessageStore, StoredHistoryMessage } from "../storage/messageStore.ts";
+import type { GatewaySettingsRepo } from "../storage/gatewaySettingsRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { AuditLog } from "../storage/auditLog.ts";
 import type { OutboundDispatcher } from "./outboundDispatcher.ts";
 import type { Logger } from "../logger.ts";
-import { groupQuery, senderLabel, GROUP_INSTRUCTION } from "./groupRelay.ts";
-import { nowIso } from "../util.ts";
-import type { SelfMembershipEvent } from "../whatsapp/groupEvents.ts";
-import { maskJid } from "../util.ts";
+import type { Shopper } from "../domain/types.ts";
+import { clientQuery, mediaLabel, paPrompt } from "./groupRelay.ts";
+import { maskJid, phoneE164FromJid, nowIso } from "../util.ts";
+
+interface RoutingDeps {
+  settings: GatewaySettingsRepo;
+  messages: MessageStore;
+  getGroup: (groupJid: string) => Promise<RoutingGroup | null>;
+  prepareHistory: (row: StoredHistoryMessage) => Promise<InboundMessage | null>;
+}
+interface Destination {
+  owner: Shopper | null;
+  ownerId: string | null;
+  roomName: string;
+  qualified: boolean;
+}
+const CLIENT: PostingIdentity = { role: "client" };
+const MembershipSchema = z.object({
+  connectionId: z.string().min(1), groupJid: z.string().regex(/@g\.us$/),
+  addedByJid: z.string().nullish(),
+});
 
 export class InboundRouter {
   private readonly chains = new Map<string, Promise<void>>();
-  private readonly membership = new Map<string, { epoch: number; ts: string }>();
-
-  private key(connectionId: string, chatJid: string): string {
-    return JSON.stringify([connectionId, chatJid]);
-  }
-
-  /** Immediate local pause, also fences a tag already waiting on MCP. */
-  onSelfMembership(event: SelfMembershipEvent): void {
-    const key = this.key(event.connectionId, event.groupJid);
-    this.membership.set(key, { epoch: (this.membership.get(key)?.epoch ?? 0) + 1, ts: nowIso() });
-    this.chatBots.pauseRelay(event.connectionId, event.groupJid);
-  }
+  private readonly epochs = new Map<string, number>();
 
   constructor(
     private readonly resolver: ShopperResolver,
@@ -44,14 +50,24 @@ export class InboundRouter {
     private readonly dispatcher: OutboundDispatcher,
     private readonly audit: AuditLog,
     private readonly log: Logger,
+    private readonly deps: RoutingDeps,
   ) {}
 
-  /** Handle one captured inbound message. Never throws to the caller. */
-  handle(msg: InboundMessage): Promise<void> {
-    const key = this.key(msg.connectionId, msg.chatJid);
-    const epoch = this.membership.get(key)?.epoch ?? 0;
-    const previous = this.chains.get(key) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.process(msg, key, epoch));
+  private key(connectionId: string, chatJid: string): string {
+    return JSON.stringify([connectionId, chatJid]);
+  }
+
+  onSelfMembership(event: SelfMembershipEvent, action: "add" | "remove" = "remove"): void {
+    const value = MembershipSchema.parse(event);
+    const key = this.key(value.connectionId, value.groupJid);
+    if (action !== "add" || this.chatBots.membership(value.connectionId, value.groupJid)?.present !== 1) {
+      this.epochs.set(key, (this.epochs.get(key) ?? 0) + 1);
+    }
+    this.chatBots.setMembership(value.connectionId, value.groupJid, action === "add", value.addedByJid);
+  }
+
+  private enqueue(key: string, work: () => Promise<void>): Promise<void> {
+    const run = (this.chains.get(key) ?? Promise.resolve()).catch(() => undefined).then(work);
     this.chains.set(key, run);
     void run.finally(() => {
       if (this.chains.get(key) === run) this.chains.delete(key);
@@ -59,127 +75,170 @@ export class InboundRouter {
     return run;
   }
 
-  private async process(msg: InboundMessage, key: string, epoch: number): Promise<void> {
-    const corrId = msg.messageId;
-    // corrId is the WhatsApp message id (opaque, not PII); bind it for the flow.
-    const log = this.log.child({ corrId, chatJid: maskJid(msg.chatJid) });
-    let claimToken: string | null = null;
+  handle(msg: InboundMessage): Promise<void> {
+    const key = this.key(msg.connectionId, msg.chatJid);
+    const epoch = this.epochs.get(key) ?? 0;
+    return this.enqueue(key, () => this.process(msg, epoch));
+  }
+
+  private available(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">, epoch: number): boolean {
+    return !msg.isGroup || (
+      epoch === (this.epochs.get(this.key(msg.connectionId, msg.chatJid)) ?? 0) &&
+      this.chatBots.membership(msg.connectionId, msg.chatJid)?.present !== 0
+    );
+  }
+
+  private clientReady(connectionId: string, chatJid: string): boolean {
+    if (this.deps.settings.getStatus().setupComplete) return true;
+    this.audit.record("inbound.rejected", {
+      subjectType: "connection", subjectId: connectionId,
+      detail: { chatJid: maskJid(chatJid), reason: "gateway_setup_incomplete" },
+    });
+    this.log.info("client traffic dropped", { chatJid: maskJid(chatJid), reason: "gateway_setup_incomplete" });
+    return false;
+  }
+
+  private async destination(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup" | "senderPhoneE164" | "fromMe">): Promise<Destination | null> {
+    const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
+    if (msg.isGroup) {
+      if (this.chatBots.membership(msg.connectionId, msg.chatJid)?.present === 0) return null;
+      const group = await this.deps.getGroup(msg.chatJid);
+      if (!group?.linkedMember) return null;
+      const membership = this.chatBots.membership(msg.connectionId, msg.chatJid);
+      const author = membership?.added_by_jid;
+      const authorPhone = author
+        ? phoneE164FromJid(author) ?? group.participants.find((p) => p.jid === author)?.phone_e164 ?? null
+        : null;
+      const candidate = this.resolver.groupOwner(
+        group.participants.flatMap((p) => p.phone_e164 ? [p.phone_e164] : []), authorPhone,
+      );
+      // Existing bots never change room or owner, even if group qualification changes.
+      const ownerId = existing ? existing.shopperId : candidate?.id ?? null;
+      const owner = existing ? this.resolver.byId(ownerId) : candidate;
+      const roomName = existing?.roomName ?? owner?.roomName ?? this.deps.settings.getCommonRoomName();
+      if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
+      return { owner, ownerId, roomName, qualified: Boolean(candidate) };
+    }
+    // fromMe is the linked phone, so use its peer to determine a fresh DM's owner.
+    const peerPhone = msg.fromMe ? phoneE164FromJid(msg.chatJid) : msg.senderPhoneE164;
+    const candidate = this.resolver.registered(peerPhone);
+    const ownerId = existing ? existing.shopperId : candidate?.id ?? null;
+    const owner = existing ? this.resolver.byId(ownerId) : candidate;
+    const roomName = existing?.roomName ?? candidate?.roomName ?? this.deps.settings.getCommonRoomName();
+    if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
+    return { owner, ownerId, roomName, qualified: false };
+  }
+
+  private identity(msg: InboundMessage, dest: Destination): PostingIdentity {
+    if (msg.fromMe) {
+      return dest.owner ? { role: "shopper", shopperId: dest.owner.id } : CLIENT;
+    }
+    if (msg.isGroup && !dest.qualified) return CLIENT;
+    const shopper = this.resolver.registered(msg.senderPhoneE164);
+    return shopper ? { role: "shopper", shopperId: shopper.id } : CLIENT;
+  }
+
+  private remember(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">, dest: Destination, ask: AskResult): ChatBot {
+    return this.chatBots.upsert({
+      connectionId: msg.connectionId, chatJid: msg.chatJid,
+      shopperId: dest.ownerId, threadId: ask.threadId, roomName: dest.roomName,
+      relayPausedAt: msg.isGroup && this.chatBots.membership(msg.connectionId, msg.chatJid)?.present === 0 ? nowIso() : null,
+    });
+  }
+
+  private async submit(
+    msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">,
+    dest: Destination, identity: PostingIdentity, query: string,
+    agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[] = [],
+    rememberFailure = true, messageId?: string,
+  ): Promise<AskResult> {
+    const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
     try {
-      if (msg.fromMe && (!msg.isGroup ||
-        this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId))) return;
-      if (msg.isGroup && epoch !== (this.membership.get(key)?.epoch ?? 0)) return;
-      // Ignore empty text/unknown messages. Media-only messages remain routable.
-      if (!promptQlQuery(msg)) return;
-
-      const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
-      const sender = this.resolver.resolve(msg.connectionId, msg.chatJid, msg.senderPhoneE164);
-      const trigger = !msg.fromMe && (!msg.isGroup || msg.mentionsSelf) && sender.ok;
-      const relay = msg.isGroup && !trigger;
-      if (relay && (!existing || existing.relayPausedAt !== null)) return;
-
-      const res = relay
-        ? this.resolver.resolveShopper(existing!.shopperId)
-        : sender;
-      if (!res.ok) {
-        this.audit.record("inbound.rejected", {
-          subjectType: "connection",
-          subjectId: msg.connectionId,
-          detail: { chatJid: maskJid(msg.chatJid), reason: res.reason },
-        });
-        log.info("inbound dropped", { reason: res.reason });
-        return;
-      }
-      const shopper = res.shopper;
-
-      const claim = this.outboundLog.claim(msg.connectionId, msg.messageId);
-      if (claim.status === "already_sent") {
-        log.info("inbound deduped (already answered)");
-        return;
-      }
-      if (claim.status === "in_flight") {
-        log.info("inbound skipped (in flight)");
-        return;
-      }
-
-      claimToken = claim.token;
-      // Room is caller-owned: use the shopper's stored room_name verbatim.
-      const roomName = shopper.roomName;
-
-      log.info("inbound ask", {
-        shopperId: shopper.id,
-        continuity: existing ? "continue" : "new",
-        resolvedVia: res.via, // "mapping" (admin-set) or "sender" (auto by phone)
+      const ask = await this.adapter.ask(identity, {
+        query, threadId: existing?.threadId ?? null,
+        roomName: existing ? null : dest.roomName, agentResponse, files,
       });
+      this.remember(msg, dest, ask);
+      return ask;
+    } catch (err) {
+      if (err instanceof AskSubmissionError) {
+        this.remember(msg, dest, err.ask);
+        // Retain only the text, encrypted. Media bytes are never retained.
+        // Recovery is a relay, not a second triggering attempt.
+        if (rememberFailure) this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, { identity, query, messageId });
+      }
+      throw err;
+    }
+  }
 
-      const files = msg.isGroup ? [] : this.loadPromptQlFiles(msg);
-      const query = msg.isGroup
-        ? groupQuery(msg, senderLabel(msg, sender.ok ? sender.shopper : undefined))
-        : promptQlQuery(msg, files.length > 0);
-      if (!query) return;
+  private async retryPending(msg: InboundMessage, dest: Destination): Promise<void> {
+    const pending = this.chatBots.pendingPost(msg.connectionId, msg.chatJid);
+    if (!pending) return;
+    if (pending.identity.role === "client" && !this.clientReady(msg.connectionId, msg.chatJid)) throw new Error("Gateway setup incomplete");
+    await this.submit(msg, dest, pending.identity, pending.query, "force_skip", [], true, pending.messageId);
+    if (pending.messageId) {
+      this.deps.messages.markRelayed(msg.connectionId, msg.chatJid, pending.messageId);
+      const claim = this.outboundLog.claim(msg.connectionId, pending.messageId);
+      if (claim.status === "claimed") this.outboundLog.markRelayed(msg.connectionId, pending.messageId, claim.token, msg.chatJid);
+    }
+    this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
+  }
 
-      let ask;
+  private async process(msg: InboundMessage, epoch: number): Promise<void> {
+    let claimToken: string | null = null;
+    const log = this.log.child({ corrId: msg.messageId, chatJid: maskJid(msg.chatJid) });
+    try {
+      if (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId)) return;
+      if (!this.available(msg, epoch) || !promptQlQuery(msg)) return;
+      const dest = await this.destination(msg);
+      if (!dest || !this.available(msg, epoch)) return;
+      const identity = this.identity(msg, dest);
+      if (identity.role === "client" && !this.clientReady(msg.connectionId, msg.chatJid)) return;
+
+      await this.retryPending(msg, dest);
+      const claim = this.outboundLog.claim(msg.connectionId, msg.messageId);
+      if (claim.status !== "claimed") return;
+      claimToken = claim.token;
+      if (!this.available(msg, epoch)) throw new Error("Group membership changed");
+
+      const shopperTrigger = !msg.fromMe && identity.role === "shopper" && (!msg.isGroup || msg.mentionsSelf);
+      const paTrigger = !msg.fromMe && msg.isGroup && dest.qualified && msg.mentionsSelf &&
+        identity.role === "client" && dest.owner?.status === "enabled";
+      const files = msg.mediaStatus === "ready" && msg.media
+        ? [promptQlFileFromMedia(msg.media, mediaFileName(msg.messageId, msg.msgType, msg.media.mime ?? null))]
+        : [];
+      let ask: AskResult;
       try {
-        // McpSession retries transient transport failures with this same
-        // in-memory payload. No persistent retry copy is created.
-        ask = await this.adapter.ask(shopper.id, {
-          query,
-          threadId: existing?.threadId ?? null,
-          roomName: existing ? null : roomName,
-          files,
-          ...(msg.isGroup ? {
-            agentResponse: relay ? "force_skip" as const : "force_respond" as const,
-            ...(!relay ? { systemInstruction: GROUP_INSTRUCTION } : {}),
-          } : {}),
-        });
+        ask = await this.submit(msg, dest, identity,
+          identity.role === "client" ? clientQuery(msg) : promptQlQuery(msg)!,
+          shopperTrigger ? "force_respond" : "force_skip", files, true, msg.messageId);
+        this.deps.messages.markRelayed(msg.connectionId, msg.chatJid, msg.messageId);
       } finally {
-        // Drop references promptly after ask_promptql accepts or exhausts its
-        // retries. The bytes are intentionally unrecoverable after a crash.
         msg.media = null;
         files.length = 0;
       }
 
-      if (relay) {
-        this.outboundLog.markRelayed(msg.connectionId, msg.messageId, claim.token, msg.chatJid);
-        log.info("group context relayed");
-        return; // force_skip never creates a workflow or waits for a response.
+      let responseIdentity = identity;
+      if (paTrigger && this.available(msg, epoch)) {
+        responseIdentity = { role: "pa", shopperId: dest.owner!.id };
+        ask = await this.submit(msg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
       }
-
-      // A successful tag resumes relay, unless membership changed during ask.
-      const latestMembership = this.membership.get(key);
-      this.chatBots.upsert({
-        connectionId: msg.connectionId,
-        chatJid: msg.chatJid,
-        shopperId: shopper.id,
-        threadId: ask.threadId,
-        roomName: existing?.roomName ?? roomName,
-        relayPausedAt: msg.isGroup && latestMembership && latestMembership.epoch !== epoch
-          ? latestMembership.ts : null,
-      });
+      if ((!shopperTrigger && !paTrigger) || !this.available(msg, epoch)) {
+        this.outboundLog.markRelayed(msg.connectionId, msg.messageId, claim.token, msg.chatJid);
+        return;
+      }
+      if (responseIdentity.role === "client") return;
       const workflow = this.workflows.create({
-        connectionId: msg.connectionId,
-        chatJid: msg.chatJid,
-        shopperId: shopper.id,
-        inboundMessageId: msg.messageId,
-        remoteRef: ask.threadId,
+        connectionId: msg.connectionId, chatJid: msg.chatJid,
+        shopperId: responseIdentity.shopperId, inboundMessageId: msg.messageId, remoteRef: ask.threadId,
       });
-
-      // Response polling and WhatsApp delivery can take minutes. Start that
-      // durable phase in the background so the inbound media queue is held only
-      // until PromptQL has accepted the attachment.
-      void this.dispatcher
-        .dispatch({
-          workflowId: workflow.id,
-          connectionId: msg.connectionId,
-          chatJid: msg.chatJid,
-          shopperId: shopper.id,
-          idempotencyKey: msg.messageId,
-          claimToken: claim.token,
-          threadId: ask.threadId,
-          threadEventId: ask.threadEventId,
-        })
-        .catch((err) => {
-          log.error("outbound dispatch failed", { err });
-        });
+      void this.dispatcher.dispatch({
+        workflowId: workflow.id, connectionId: msg.connectionId, chatJid: msg.chatJid,
+        shopperId: responseIdentity.shopperId, credentialRole: responseIdentity.role,
+        idempotencyKey: msg.messageId, claimToken: claim.token,
+        threadId: ask.threadId, threadEventId: ask.threadEventId,
+        pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
+      }).catch((err) => log.error("outbound dispatch failed", { err }));
     } catch (err) {
       if (claimToken) this.outboundLog.markFailed(msg.connectionId, msg.messageId, claimToken);
       log.error("inbound error", { err });
@@ -188,36 +247,54 @@ export class InboundRouter {
     }
   }
 
-  private loadPromptQlFiles(msg: InboundMessage): PromptQlFileInput[] {
-    if (msg.mediaStatus !== "ready" || !msg.media) return [];
-    return [
-      {
-        file_name: mediaFileName(msg.messageId, msg.msgType, msg.media.mime ?? null),
-        mime_type: msg.media.mime ?? "application/octet-stream",
-        content_base64: msg.media.bytes.toString("base64"),
-      },
-    ];
+  onHistoryBatch(event: HistoryBatchEvent): Promise<void> {
+    const parsed = MembershipSchema.extend({ count: z.number().int().nonnegative() }).parse(event);
+    const key = this.key(parsed.connectionId, parsed.groupJid);
+    const epoch = this.epochs.get(key) ?? 0;
+    return this.enqueue(key, async () => {
+      const msg = { connectionId: parsed.connectionId, chatJid: parsed.groupJid, isGroup: true, senderPhoneE164: null, fromMe: false };
+      const rows = this.deps.messages.listUnrelayedHistory(msg.connectionId, msg.chatJid);
+      if (!rows.length || !this.available(msg, epoch) || !this.clientReady(msg.connectionId, msg.chatJid)) return;
+      const dest = await this.destination(msg);
+      if (!dest || !this.available(msg, epoch)) return;
+      try {
+        await this.submit(msg, dest, CLIENT, `Replaying ${rows.length} messages from group history, oldest first`, "force_skip", [], false);
+        for (const row of rows) {
+          if (!this.available(msg, epoch)) return;
+          let replay: InboundMessage | null = null;
+          try {
+            replay = await this.deps.prepareHistory(row);
+            if (!replay || !this.available(msg, epoch)) continue;
+            const identity = this.identity(replay, dest);
+            const files = replay.mediaStatus === "ready" && replay.media
+              ? [promptQlFileFromMedia(replay.media, mediaFileName(replay.messageId, replay.msgType, replay.media.mime ?? null))]
+              : [];
+            const query = identity.role === "client" ? clientQuery(replay) : promptQlQuery(replay);
+            if (!query) continue;
+            // Failed history stays in the history repository, not the live retry slot.
+            await this.submit(msg, dest, identity, query, "force_skip", files, false);
+            this.deps.messages.markRelayed(row.connectionId, row.chatJid, row.messageId);
+          } catch {
+            this.log.warn("history row relay failed", { corrId: row.messageId, chatJid: maskJid(row.chatJid) });
+          } finally {
+            if (replay) replay.media = null;
+          }
+        }
+        if (this.available(msg, epoch)) await this.submit(msg, dest, CLIENT, "End of history", "force_skip", [], false);
+      } catch {
+        this.log.warn("history bracket relay failed", { chatJid: maskJid(msg.chatJid) });
+      }
+    });
   }
 }
 
-export function promptQlQuery(
-  msg: InboundMessage,
-  attachedToPromptQl = false,
-): string | null {
-  const text = msg.text.trim();
-  if (msg.msgType === "text" || msg.msgType === "unknown") {
-    return text || null;
-  }
-
-  const availability = attachedToPromptQl
-    ? "included as a PromptQL file attachment"
-    : `unavailable (${msg.mediaStatus})`;
-  const descriptor =
-    `[WhatsApp ${msg.msgType} attached; media is ${availability}; ` +
-    `chat_id=${msg.chatJid}; message_id=${msg.messageId}]`;
-  return text ? `${text}\n\n${descriptor}` : descriptor;
+/** Shopper text is unchanged. Media without a caption gets only its kind. */
+export function promptQlQuery(msg: InboundMessage, _attached = false): string | null {
+  if (msg.text.trim()) return msg.text;
+  const media = mediaLabel(msg);
+  if (!media) return null;
+  return media.kind === "document" && media.fileName ? `(document: ${media.fileName})` : `(${media.kind})`;
 }
-
 export function mediaFileName(
   messageId: string,
   messageType: string,

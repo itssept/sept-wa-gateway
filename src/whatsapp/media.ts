@@ -36,6 +36,10 @@ const MESSAGE_TYPES: ReadonlyArray<readonly [string, string]> = [
   ["audioMessage", "audio"],
   ["documentMessage", "document"],
   ["stickerMessage", "sticker"],
+  ["contactMessage", "contact"],
+  ["contactsArrayMessage", "contact"],
+  ["locationMessage", "location"],
+  ["liveLocationMessage", "location"],
 ];
 
 export function hasMedia(message: WAMessage): boolean {
@@ -69,7 +73,7 @@ const DocumentMetadataSchema = z.object({
 /** Validate external metadata and discard path/control characters before this
  * name becomes an attachment identifier. Invalid metadata uses the fallback.
  */
-function documentFileName(message: WAMessage): string | undefined {
+export function documentFileName(message: WAMessage): string | undefined {
   const parsed = DocumentMetadataSchema.safeParse(message.message?.documentMessage);
   if (!parsed.success || !parsed.data.fileName) return undefined;
   const name = parsed.data.fileName.split(/[\/\\]/).pop()!

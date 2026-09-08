@@ -87,7 +87,7 @@ export class ShopperRepo {
 
   list(): Shopper[] {
     return this.db
-      .query<Row, []>("SELECT * FROM shopper ORDER BY created_at ASC")
+      .query<Row, []>("SELECT * FROM shopper ORDER BY created_at ASC, rowid ASC")
       .all()
       .map(toShopper);
   }

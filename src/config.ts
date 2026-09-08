@@ -87,6 +87,8 @@ const EnvSchema = z.object({
   WHATSAPP_CAPTURE_GROUP_HISTORY: z.enum(["true", "false"]).default("true")
     .transform((value) => value === "true"),
 
+  WHATSAPP_HISTORY_JOIN_WAIT_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
+
   // Retention.
   WHATSAPP_MESSAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
 
@@ -128,6 +130,7 @@ export interface Config {
   groupMetaTtlMs: number;
   messageRetentionDays: number;
   captureGroupHistory: boolean;
+  historyJoinWaitMs: number;
 
   mcp: {
     /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
@@ -174,6 +177,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     groupMetaTtlMs: e.WHATSAPP_GROUP_META_TTL_MS,
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
     captureGroupHistory: e.WHATSAPP_CAPTURE_GROUP_HISTORY,
+    historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
 
     mcp: {
       endpoint: e.PROMPTQL_MCP_URL,

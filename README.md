@@ -35,7 +35,7 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 | Config | `src/config.ts` | Zod-validated env. MCP URL / path / auth scheme configurable. |
 | Crypto | `src/crypto.ts` | AES-256-GCM at rest, constant-time compare, one-way hash. |
 | Storage | `src/storage/` | SQLite migrations + repositories. |
-| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth, socket lifecycle, anti-ban queue, transient DM media download. |
+| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth, socket lifecycle, anti-ban queue, transient media download. |
 | Security | `src/security/` | Admin auth (constant-time). |
 | PromptQL | `src/promptql/` | MCP client (JSON-RPC 2.0 / Streamable HTTP), adapter, discovery diagnostic. |
 | Routing | `src/routing/` | Resolver, inbound router, outbound dispatcher. |
@@ -43,73 +43,90 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 
 ## How it works
 
-- **Shoppers must be registered first.** Registration stores a name, canonical
-  phone (E.164), a generated shopper id, a caller-owned PromptQL `roomName`, and
-  one MCP-scoped service-account token (encrypted at rest, never returned after
-  creation).
-- **Routing keys on the sender.** The gateway auto-resolves by the message
-  sender's phone to a registered, enabled shopper. DMs retain internal mapping
-  overrides; group tags always use the sender's own registration. Unregistered
-  senders never trigger the bot, but can contribute group context after the
-  first tag. There is no mappings API.
-- **Each shopper gets its own MCP session,** so PromptQL attributes the work to
-  the right service account. Follow-up messages continue the same bot (per-chat
-  continuity in `chat_bot`).
-- **DM media is downloaded transiently and attached to PromptQL.** WhatsApp CDN
-  URLs expire, so supported image, video, audio, document, and sticker messages
-  are downloaded into bounded memory and relayed through `ask_promptql.files`.
-  The bytes are discarded after the MCP call accepts or exhausts its retries;
-  they are never persisted by the gateway. A process crash loses any in-flight
-  media. The raw-media limit is 7 MiB so base64 plus query metadata stays below
-  the default 10 MiB MCP request cap.
-- **Every `/api/v1/*` endpoint requires the admin token** (`GATEWAY_ADMIN_TOKEN`,
-  constant-time compare). Secrets are encrypted at rest and never logged or
-  returned after creation. Rejected senders are silently dropped with an audit
-  line, with no unsolicited reply. Group messages before activation are simply
-  captured; they do not create a PromptQL bot.
+- Call `/api/v1/setup` with the gateway's Client service-account token and common
+  public room. Then link the WhatsApp number and complete pairing. Finally,
+  register each shopper with their public room and two distinct MCP tokens:
+  shopper and PA (personal assistant).
+- One bot is kept per WhatsApp chat. Posting identity is chosen per message.
+  MCP sessions are isolated by shopper and role, plus a separate Client session.
+  Registration, setup, rotation and revocation invalidate the affected sessions.
+- Shopper text is sent unchanged, without a prefix. Client posts use
+  `[Client] <push name>, <E.164>` on one line, then the text or caption. Missing
+  names are omitted; missing phones use the opaque LID or `no phone`.
+- Image, video, audio, document and sticker files are downloaded transiently
+  in DMs and groups, attached through `ask_promptql.files`, then released.
+  Original document names and voice-note labels are preserved. Contact cards
+  and locations get labels only, not converted attachments. Failed downloads
+  still relay the caption or media kind. Bytes are never persisted.
+- The raw-media limit is 7 MiB; the complete MCP request is capped at 10 MiB.
+  A partial MCP failure preserves any returned bot handle. Its text is retained
+  encrypted and retried without media or a bot run on the next message.
+- Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`. Missing Client
+  setup drops Client traffic with an audit/log, without a WhatsApp reply.
 
-### Group behavior
+### Routing
 
-| Group state | Ordinary message, including an unregistered member's tag | Registered shopper tags the linked number |
+A qualifying group contains the linked number and at least one enabled,
+registered shopper. Mirroring starts with the first message, without a tag.
+
+| Message | Posting identity | Bot response |
 |---|---|---|
-| Never tagged | Capture only | Create a bot and send only this message |
-| Active | Mirror with `force_skip`, no bot run | Continue with `force_respond` under the tagger's token |
-| Removed or re-added | Capture only when messages arrive | Continue the same bot and resume mirroring |
+| Shopper DM | Shopper | Always; reply to DM |
+| Shopper in qualifying group | That shopper | Only when tagging the linked number |
+| Client in qualifying group | Client | Relay only |
+| Client tag in qualifying group | Client relay, then owner's PA prompt | PA reply to group |
+| Client DM or any message in unqualified group | Client, common room | Never |
+| Linked phone's manual message | Fixed owner's shopper identity, or Client for common-room chats | Never |
+| Gateway's own reply | Not posted again | None |
 
-The group's shoppers share one bot. Each responding tag uses its sender's
-credentials; other messages use the last tagger's token with a sender label.
-The linked phone's manual messages are mirrored too. Gateway replies are not,
-because they already exist in the bot's chat.
+A qualifying group's owner is the shopper who added the linked number, or the
+earliest registered enabled shopper in the group if the inviter is not one.
+Owner and room are fixed when the bot is created. Another shopper's tag or
+removal/re-add never transfers ownership. Shopper and common rooms must be
+public so all three identities can access the same bot.
 
-Group media is sent as `[WhatsApp image]` (or the relevant type) plus its
-caption. Group text has `@digits` stripped and a name/phone prefix. The default
-for an unregistered member is full E.164, with an explicit opaque JID fallback
-when WhatsApp supplies no phone. This formatting lives in `senderLabel()`.
+Client tags first relay with `force_skip`, then the owner's PA posts:
+`Please respond to the client message above on behalf of [shopper name].`
+This second post uses `force_respond`; its reply goes through the outbound
+queue with `pa_reply` pacing. Shopper replies retain default pacing.
 
-Removing or re-adding the linked account pauses mirroring until the next tag.
-There are no membership marker posts, history backfills, or fallback DMs.
-Pending replies are skipped with `chat_left` when paused; an already-sending
-reply can still fail at WhatsApp and is logged.
+Removal stops relay and suppresses pending replies with `chat_left`. Re-add
+resumes the same bot and owner, without needing another tag. Manual messages
+never trigger. Only current-message mentions of the linked PN JID or LID count,
+not quoted mentions.
 
-Submissions are FIFO per chat through MCP acceptance. Context-only posts use
-the outbound idempotency log and never start a response wait. Local duplicate
-suppression is durable, but a crash or ambiguous remote MCP acceptance can
-still leave a gap or duplicate; there is no remote exactly-once guarantee or
-catch-up job.
+Submissions are FIFO through MCP acceptance, not through the response wait.
+`force_skip` never creates a response workflow or WhatsApp reply. Local
+deduplication is durable, but a crash or ambiguous remote acceptance can still
+leave a gap or duplicate. There is no remote exactly-once guarantee.
+
+### Group history
+
+`WHATSAPP_CAPTURE_GROUP_HISTORY=true` captures history WhatsApp shares on
+join/re-add. `WHATSAPP_HISTORY_JOIN_WAIT_MS` defaults to 5000 (integer 0 to
+60000). Live messages for that group wait for history completion
+(`progress=100` or an unchunked event) or the timeout, without blocking history
+capture. Set 0 to disable the join wait.
+
+History chunks received during the wait are sorted together, oldest first.
+Client posts `Replaying N messages from group history, oldest first`, each row
+is relayed using the normal identity, envelope and file rules with `force_skip`,
+then Client posts `End of history`. No rows means no bot or bracket posts.
+Only accepted rows are marked relayed. Failed rows remain available for a
+later batch; there is no automatic retry loop.
+
+History arriving after the join wait is replayed late, before subsequent live
+traffic. A small number of live messages can therefore precede it. Ordering
+across chunks that arrive after the timeout cannot be globally guaranteed.
+Replay never triggers a bot run or sends a WhatsApp reply.
 
 ### Rollout checks
 
-Set `PROMPTQL_PROJECT_NAME` if the deployed `ask_promptql` schema requires
-`project_name`; the adapter omits it when unset for older project-scoped servers.
-Before rollout, use a shopper token with `listTools()` to confirm
-`agent_response` support and whether `project_name` is required.
-
-Also verify that shopper B can post `force_skip` into a bot created by shopper A,
-and whether context-only posts consume credits. These checks require live
-shopper tokens and are not covered by unit tests. Group room placement remains
-unchanged: the first tagger's room is used, so participating service accounts
-must share access. A group-specific room model and group file attachments are
-deferred.
+Set `PROMPTQL_PROJECT_NAME` if the deployed MCP schema requires it. Before
+rollout, confirm `agent_response` and file support using live shopper, PA and
+Client tokens, and confirm that all identities can post into the public rooms
+and each other's bots. Tests mock these boundaries; they are not a live
+WhatsApp or production-token validation.
 
 The gateway emits **structured JSON logs** (one object per line) to **stderr**
 for cloud log aggregation. PII (phone numbers, jids, secrets) is masked, and
@@ -129,18 +146,25 @@ openssl rand -hex 32      # DATA_ENCRYPTION_KEY
 bun run start
 ```
 
-Link a number over the API — this is the **only** way to set the number:
+Follow this order: **setup, link, then register shoppers**. Linking and
+registration return `409` until setup is complete. The API is the only way to
+set the linked number:
 
 ```bash
 ADMIN=<GATEWAY_ADMIN_TOKEN>
 BASE=http://localhost:8790
 
-# 1. Start pairing.
+# 1. Configure the gateway Client SA and common public room.
+curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -X POST $BASE/api/v1/setup \
+  -d '{"clientMcpToken":"<client-token>","commonRoomName":"sept-common"}'
+
+# 2. Start pairing.
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/connection/link \
   -d '{"phone":"+14155551212","deviceLabel":"sept-gateway"}'
 
-# 2. Poll for the pairing code, then enter it on the phone:
+# Poll for the pairing code, then enter it on the phone:
 #    Linked Devices → Link a Device → Link with phone number instead.
 curl -H "Authorization: Bearer $ADMIN" $BASE/api/v1/connection
 # ...repeat until "status":"linked".
@@ -151,13 +175,13 @@ on the next boot without re-pairing. Expose the API through a tunnel for local
 testing (`ngrok http 8790`); the tunnel URL is not a security boundary — the
 admin token gates every call.
 
-### Register a shopper
+### 3. Register a shopper
 
 ```bash
-# roomName is the caller-owned PromptQL room_name for this shopper (mandatory).
+# Each shopper has a public room and separate shopper and PA tokens.
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/shoppers \
-  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<mcp-scoped-token>"}'
+  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<shopper-token>","paMcpToken":"<pa-token>"}'
 ```
 
 That is all a shopper needs. Their WhatsApp messages to the linked number then

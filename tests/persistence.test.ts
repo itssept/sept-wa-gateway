@@ -205,3 +205,40 @@ test("history migration preserves live rows and replay markers survive restart",
     for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
   }
 });
+
+test("migration 8 preserves old bot owner/room and pending retry plus membership survive reboot", async () => {
+  const { Database } = await import("bun:sqlite");
+  const { MIGRATIONS } = await import("../src/storage/schema.ts");
+  const path = tmpDbPath();
+  try {
+    const old = new Database(path, { create: true });
+    old.run("CREATE TABLE _gateway_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+    for (const migration of MIGRATIONS.filter((m) => m.version < 8)) {
+      old.run(migration.sql);
+      old.run("INSERT INTO _gateway_migrations VALUES (?, ?, ?)", [migration.version, migration.name, nowIso()]);
+    }
+    old.run("INSERT INTO chat_bot VALUES ('conn', '123@g.us', 'owner', 'old-bot', 'old-room', ?, ?, NULL)", [nowIso(), nowIso()]);
+    old.close();
+    const upgraded = openDatabase(path);
+    const bots = new ChatBotRepo(upgraded, ENC);
+    expect(bots.get("conn", "123@g.us")).toMatchObject({ shopperId: "owner", threadId: "old-bot", roomName: "old-room" });
+    bots.setMembership("conn", "123@g.us", true, "inviter@lid");
+    bots.upsert({ connectionId: "conn", chatJid: "123@g.us", shopperId: "other", roomName: "other-room", threadId: "old-bot" });
+    bots.setPendingPost("conn", "123@g.us", { identity: { role: "pa", shopperId: "owner" }, query: "private retry", messageId: "message" });
+    bots.upsert({ connectionId: "conn", chatJid: "client@s.whatsapp.net", shopperId: null, threadId: "client-bot", roomName: "common" });
+    bots.setMembership("conn", "123@g.us", false);
+    upgraded.close();
+    const rebooted = openDatabase(path);
+    const restored = new ChatBotRepo(rebooted, ENC);
+    expect(restored.get("conn", "123@g.us")).toMatchObject({ shopperId: "owner", threadId: "old-bot", roomName: "old-room" });
+    expect(restored.get("conn", "123@g.us")?.relayPausedAt).not.toBeNull();
+    expect(restored.pendingPost("conn", "123@g.us")).toEqual({ identity: { role: "pa", shopperId: "owner" }, query: "private retry", messageId: "message" });
+    expect(restored.membership("conn", "123@g.us")).toMatchObject({ present: 0, added_by_jid: "inviter@lid" });
+    restored.setMembership("conn", "123@g.us", true, "new@lid");
+    expect(restored.get("conn", "123@g.us")).toMatchObject({ shopperId: "owner", relayPausedAt: null });
+    expect(restored.get("conn", "client@s.whatsapp.net")?.shopperId).toBeNull();
+    rebooted.close();
+  } finally {
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+  }
+});

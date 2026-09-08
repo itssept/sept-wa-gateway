@@ -77,3 +77,8 @@ test("membership boundary rejects the old string-array assumption and malformed 
   expect(() => selfParticipantUpdate({ id: group, action: "remove", participants: ["999123@lid"] }, user)).toThrow();
   expect(() => selfGroupUpserts([{ id: group, participants: null }], user)).toThrow();
 });
+test("inviter is retained with device suffix removed, never inferred from a LID", () => {
+  expect(selfParticipantUpdate({
+    id: group, action: "add", author: "inviter:4@lid", participants: [{ id: "999123@lid" }],
+  }, user)).toEqual({ groupJid: group, action: "add", addedByJid: "inviter@lid" });
+});

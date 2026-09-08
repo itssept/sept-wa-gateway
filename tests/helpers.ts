@@ -31,6 +31,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     groupMetaTtlMs: 3_600_000,
     messageRetentionDays: 90,
     captureGroupHistory: true,
+    historyJoinWaitMs: 0,
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

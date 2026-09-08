@@ -33,6 +33,7 @@ export interface DispatchInput {
   threadEventId: string | null;
   /** Routing may opt PA replies to clients into the extra pause. */
   pacingProfile?: PacingProfile;
+  credentialRole?: "shopper" | "pa";
 }
 
 export class OutboundDispatcher {
@@ -52,7 +53,7 @@ export class OutboundDispatcher {
     let answer: string | null = null;
     try {
       const res = await this.adapter.waitForResponse(
-        input.shopperId,
+        { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" },
         { threadId: input.threadId, threadEventId: input.threadEventId },
         deadline,
       );

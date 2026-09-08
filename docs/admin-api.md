@@ -109,8 +109,9 @@ Response:
 { "setupComplete": true, "commonRoomName": "sept-common" }
 ```
 
-This stores credentials only. Routing under Client and PA identities is a
-separate change; setup alone does not change message routing.
+Setup enables Client relays and replaces the cached Client MCP session.
+Missing Client setup drops Client traffic with an audit/log. It does not create
+rooms; `commonRoomName` must refer to the intended public room.
 
 ## Connection
 
@@ -224,8 +225,8 @@ shoppers or credentials. It does not invent or copy a PA token. Therefore:
 
 Until re-registration, existing shoppers have no PA token:
 `getActiveToken(shopperId, "pa")` returns `null`. The migration does not disable
-them or alter current routing. Re-register them before enabling the routing
-changes that depend on PA credentials.
+them. Re-register them before rollout: a missing PA token prevents PA replies
+and never falls back to the shopper token.
 
 ### GET /api/v1/shoppers
 
@@ -265,7 +266,7 @@ Example PA token rotation body:
 ### POST /api/v1/shoppers/:id/credential/revoke
 
 Revoke only the selected role's active MCP token and invalidate the shopper's
-cached MCP session. The other role is unchanged. `404` if the shopper is not
+cached MCP session for that role. The other role is unchanged. `404` if the shopper is not
 found. Missing or invalid role returns `422`.
 
 Body: `{ "role": "shopper" | "pa" }`
@@ -294,8 +295,27 @@ expose chat mappings or change group membership.
   before setup.
 
 Decrypted tokens are for immediate MCP use only. Never log, return over the
-admin API, or persist the plaintext. Role-aware routing must keep MCP sessions
-separate by identity and invalidate the affected session when tokens change.
+admin API, or persist the plaintext. Sessions are cached separately by shopper
+and role, plus Client. Registration invalidates both shopper roles; setup
+invalidates Client; rotate/revoke invalidate only the selected role.
+
+### Routing and history configuration
+
+- Shopper DMs always trigger. Qualifying groups mirror every message and reply
+  only to shopper tags or the fixed owner's PA prompt after a Client tag.
+- Client DMs and unqualified groups relay to the common public room without
+  triggering. All participating identities need access to the public rooms.
+- Migration 8 preserves existing bot handles and freezes their owner/room.
+  It permits ownerless common-room bots, records membership/inviter, and stores
+  pending text encrypted for partial MCP submission recovery.
+- `WHATSAPP_CAPTURE_GROUP_HISTORY` defaults to `true`.
+  `WHATSAPP_HISTORY_JOIN_WAIT_MS` defaults to `5000`, integer `0` to `60000`.
+  Late history replays before subsequent live traffic, but a few live messages
+  may precede it after the wait expires. Replay never triggers or replies.
+- PA responses use `WHATSAPP_PA_REPLY_DELAY_MIN_MS` (default `2000`) and
+  `WHATSAPP_PA_REPLY_DELAY_MAX_MS` (default `5000`) before normal queue pacing.
+
+See [README](../README.md#routing) for the full routing matrix.
 
 ## Status (debug)
 

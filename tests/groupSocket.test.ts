@@ -57,16 +57,16 @@ test("socket captures manual own group messages, routes once, and never triggers
   await (conn as any).onMessagesUpsert({ type: "notify", messages: [message("manual", true)] }, sock);
   await (conn as any).onMessagesUpsert({ type: "append", messages: [message("manual", true)] }, sock);
   await (conn as any).onMessagesUpsert({ type: "notify", messages: [message("dm-own", true, "14155551111@s.whatsapp.net")] }, sock);
-  expect(inbound).toHaveLength(1);
+  expect(inbound).toHaveLength(2);
   expect(inbound[0]!.mentionsSelf).toBe(false);
   expect(inbound[0]!.senderPhoneE164).toBe("+14155550000");
   expect(db.query("SELECT COUNT(1) AS n FROM whatsapp_message_store").get()).toEqual({ n: 2 });
   db.close();
 });
 
-test("socket sets mentionsSelf and group captions do not download media", async () => {
+test("socket sets mentionsSelf and downloads group media", async () => {
   const { conn, sock, inbound, db } = setup();
-  (conn as any).media.download = () => { throw new Error("must not download group files"); };
+  (conn as any).media.download = async () => ({ status: "ready", media: { bytes: Buffer.from("img"), mime: "image/jpeg", sizeBytes: 3 } });
   await (conn as any).onMessagesUpsert({ type: "notify", messages: [{
     key: { id: "image", remoteJid: GROUP, participant: "123@lid", participantAlt: "14155551111@s.whatsapp.net" },
     message: { imageMessage: { caption: "look @14155550000", contextInfo: { mentionedJid: ["999123@lid"] } } },
@@ -74,7 +74,7 @@ test("socket sets mentionsSelf and group captions do not download media", async 
   expect(inbound[0]!.mentionsSelf).toBe(true);
   expect(inbound[0]!.senderPhoneE164).toBe("+14155551111");
   expect(inbound[0]!.text).toBe("look @14155550000");
-  expect(inbound[0]!.media).toBeNull();
+  expect(inbound[0]!.media?.bytes).toEqual(Buffer.from("img"));
   db.close();
 });
 
@@ -181,4 +181,36 @@ test("socket rejects an invalid pacing profile before queueing", async () => {
   } finally {
     db.close();
   }
+});
+
+test("parser retains pushName, ptt and document filename without a successful download", async () => {
+  const { conn, sock, inbound, db } = setup();
+  (conn as any).media.download = async () => ({ status: "expired", media: null });
+  for (const [id, content] of [
+    ["doc", { documentMessage: { fileName: "invoice.pdf" } }],
+    ["voice", { audioMessage: { ptt: true } }],
+    ["contact", { contactMessage: { displayName: "Contact", vcard: "private card" } }],
+    ["location", { locationMessage: { degreesLatitude: 1, degreesLongitude: 2 } }],
+  ] as const) {
+    await (conn as any).onMessagesUpsert({ type: "notify", messages: [{
+      key: { id, remoteJid: GROUP, participant: "123@lid" }, pushName: "Client Name",
+      message: { ephemeralMessage: { message: content } },
+    }] }, sock);
+  }
+  expect(inbound[0]).toMatchObject({ pushName: "Client Name", fileName: "invoice.pdf", mediaStatus: "expired", msgType: "document" });
+  expect(inbound[1]).toMatchObject({ ptt: true, msgType: "audio" });
+  expect(inbound[2]!.msgType).toBe("contact");
+  expect(inbound[3]!.msgType).toBe("location");
+  expect(inbound.every((m) => m.media === null)).toBe(true);
+  db.close();
+});
+
+test("participant changes invalidate cached membership", async () => {
+  const { conn, sock, db } = setup();
+  const groups = (conn as any).groups as GroupMetaStore;
+  groups.upsert("test-conn", { id: GROUP, subject: "old", owner: undefined, participants: [{ id: "someone@lid" }] });
+  (conn as any).onParticipantUpdate({ id: GROUP, action: "add", author: "14155551111:9@s.whatsapp.net", participants: [{ id: user.lid }] }, sock);
+  await new Promise((r) => setTimeout(r, 0));
+  expect((await conn.routingGroup(GROUP))?.linkedMember).toBe(true);
+  db.close();
 });

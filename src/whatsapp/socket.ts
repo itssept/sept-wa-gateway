@@ -56,6 +56,8 @@ import {
   phoneE164FromJid,
 } from "../util.ts";
 
+import { documentFileName } from "./media.ts";
+
 const MAX_BACKOFF_MS = 5 * 60 * 1000;
 const BASE_BACKOFF_MS = 2_000;
 const MAX_LINK_ATTEMPTS = 20;
@@ -70,11 +72,26 @@ export interface InboundMessage {
   ts: number;
   text: string;
   msgType: string;
+  pushName?: string | null;
+  fileName?: string;
+  ptt?: boolean;
   mediaStatus: MediaStatus;
   media: DownloadedMedia | null;
   isGroup: boolean;
   fromMe: boolean;
   mentionsSelf: boolean;
+}
+
+export interface RoutingGroup {
+  linkedMember: boolean;
+  participants: Array<{ jid: string; phone_e164: string | null }>;
+}
+
+interface JoinWait {
+  timer: ReturnType<typeof setTimeout>;
+  messages: WAMessage[];
+  sock: WASocket;
+  epoch: number;
 }
 
 export interface HistoryBatchEvent extends SelfMembershipEvent {
@@ -122,8 +139,10 @@ export class WhatsAppConnection {
   private readonly media: TransientMediaDownloader;
   private readonly log: Logger;
   private readonly outboundLog: OutboundLog;
+  private readonly selfPresent = new Map<string, boolean>();
   private readonly groupEpochs = new Map<string, number>();
   private readonly pendingHistoryGroups = new Set<string>();
+  private readonly joinWaits = new Map<string, JoinWait>();
   private inboundQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -261,6 +280,9 @@ export class WhatsAppConnection {
     // Wipe persisted session so pairing starts clean (never carry stale creds).
     this.live.auth.clear();
     this.pendingHistoryGroups.clear();
+    this.selfPresent.clear();
+    for (const wait of this.joinWaits.values()) clearTimeout(wait.timer);
+    this.joinWaits.clear();
     this.live.auth = useSqliteAuthState(
       this.db,
       this.config.connectionId,
@@ -287,6 +309,9 @@ export class WhatsAppConnection {
     this.stop();
     this.live.auth.clear();
     this.pendingHistoryGroups.clear();
+    this.selfPresent.clear();
+    for (const wait of this.joinWaits.values()) clearTimeout(wait.timer);
+    this.joinWaits.clear();
     this.live.status = "logged_out";
     this.live.linkedAtMs = null;
     this.live.pairingCode = undefined;
@@ -381,10 +406,11 @@ export class WhatsAppConnection {
   private onParticipantUpdate(update: unknown, sock: WASocket): void {
     try {
       const event = selfParticipantUpdate(update, sock.user);
-      if (event) this.onSelfMembership(event.groupJid, event.action);
+      if (event) this.onSelfMembership(event.groupJid, event.action, event.addedByJid);
       // Do not re-fetch metadata after removal: the account cannot read it.
       if (event?.action === "remove") return;
       const { id } = z.object({ id: z.string().min(1) }).parse(update);
+      this.groups.invalidate(this.config.connectionId, id);
       void this.groups.readOrFetch(this.config.connectionId, id, sock)
         .catch(() => undefined);
     } catch {
@@ -402,9 +428,20 @@ export class WhatsAppConnection {
     }
   }
 
-  private onSelfMembership(groupJid: string, action: "add" | "remove"): void {
+  private onSelfMembership(groupJid: string, action: "add" | "remove", addedByJid?: string | null): void {
+    const duplicateAdd = action === "add" && this.selfPresent.get(groupJid) === true;
+    this.selfPresent.set(groupJid, action === "add");
+    if (duplicateAdd) {
+      // Baileys may report the same join via upsert and participant events.
+      // Fill inviter metadata without discarding buffered live messages.
+      this.hooks.onSelfAdded?.({ connectionId: this.config.connectionId, groupJid, addedByJid });
+      return;
+    }
     this.groupEpochs.set(groupJid, (this.groupEpochs.get(groupJid) ?? 0) + 1);
-    const event = { connectionId: this.config.connectionId, groupJid };
+    const event = { connectionId: this.config.connectionId, groupJid, ...(addedByJid ? { addedByJid } : {}) };
+    const oldWait = this.joinWaits.get(groupJid);
+    if (oldWait) clearTimeout(oldWait.timer);
+    this.joinWaits.delete(groupJid);
     if (action === "remove") {
       this.pendingHistoryGroups.delete(groupJid);
       this.groups.remove(event.connectionId, groupJid);
@@ -413,7 +450,50 @@ export class WhatsAppConnection {
       if (this.config.captureGroupHistory) this.pendingHistoryGroups.add(groupJid);
       this.groups.allowFetch(event.connectionId, groupJid);
       this.hooks.onSelfAdded?.(event);
+      if (this.config.captureGroupHistory && this.config.historyJoinWaitMs > 0 && this.live.sock) {
+        const epoch = this.groupEpochs.get(groupJid)!;
+        const timer = setTimeout(() => {
+          this.inboundQueue = this.inboundQueue.then(async () => {
+            if (this.joinWaits.get(groupJid)?.epoch !== epoch) return;
+            // Replay all partial chunks, sorted together, before releasing live input.
+            await this.notifyHistory(groupJid, 0);
+            if (this.joinWaits.get(groupJid)?.epoch === epoch) await this.releaseJoinWait(groupJid);
+          }).catch(() => this.log.warn("history join wait release failed", { groupJid: maskJid(groupJid) }));
+        }, this.config.historyJoinWaitMs);
+        this.joinWaits.set(groupJid, { timer, messages: [], sock: this.live.sock, epoch });
+      }
     }
+  }
+
+  private async notifyHistory(groupJid: string, count: number): Promise<void> {
+    try {
+      await this.hooks.onHistoryBatch?.({ connectionId: this.config.connectionId, groupJid, count });
+    } catch {
+      this.log.warn("history batch callback failed", { groupJid: maskJid(groupJid) });
+    }
+  }
+
+  private async releaseJoinWait(groupJid: string): Promise<void> {
+    const wait = this.joinWaits.get(groupJid);
+    if (!wait) return;
+    clearTimeout(wait.timer);
+    this.joinWaits.delete(groupJid);
+    if (wait.epoch !== this.groupEpochs.get(groupJid)) return;
+    await this.onMessagesUpsert({ type: "notify", messages: wait.messages }, wait.sock, new Map([[groupJid, wait.epoch]]));
+  }
+
+  async routingGroup(groupJid: string): Promise<RoutingGroup | null> {
+    z.string().regex(/^[^@\s]+@g\.us$/).parse(groupJid);
+    const sock = this.live.sock;
+    if (!sock) return null;
+    const group = await this.groups.readOrFetch(this.config.connectionId, groupJid, sock);
+    if (!group) return null;
+    const own = ownJids(sock.user);
+    const phones = [...own].map(phoneE164FromJid).filter(Boolean);
+    return {
+      participants: group.participants,
+      linkedMember: group.participants.some((p) => own.has(p.jid.replace(/:\d+(?=@)/, "")) || Boolean(p.phone_e164 && phones.includes(p.phone_e164))),
+    };
   }
 
   private queueHistoryBatch(payload: unknown, sock: WASocket): void {
@@ -453,6 +533,13 @@ export class WhatsAppConnection {
       grouped.set(groupJid, messages);
     }
 
+    const complete = batch.progress === 100 || (batch.progress == null && batch.chunkOrder == null);
+    // Completion may be an empty final chunk or mention the group only in chats.
+    if (complete) {
+      for (const jid of this.pendingHistoryGroups) {
+        if ((epochs.get(jid) ?? 0) === (this.groupEpochs.get(jid) ?? 0) && !grouped.has(jid)) grouped.set(jid, []);
+      }
+    }
     for (const [groupJid, messages] of grouped) {
       // A previous group's async replay may have overlapped a removal/re-add.
       if (!this.pendingHistoryGroups.has(groupJid) ||
@@ -481,14 +568,12 @@ export class WhatsAppConnection {
       // reference on demand through prepareHistoryMessage(), then releases it.
       // isLatest marks a first sync, so only progress=100 (or an unchunked event)
       // closes this join's capture window.
-      if (batch.progress === 100 || (batch.progress == null && batch.chunkOrder == null)) {
-        this.pendingHistoryGroups.delete(groupJid);
-      }
-      try {
-        await this.hooks.onHistoryBatch?.({ connectionId: this.config.connectionId, groupJid, count });
-      } catch {
-        // Rows stay unrelayed and queryable even if the replay consumer fails.
-        this.log.error("history batch callback failed", { groupJid: maskJid(groupJid) });
+      if (complete) this.pendingHistoryGroups.delete(groupJid);
+      // Gather chunks during the join wait so older rows in later chunks sort first.
+      // After timeout, each arriving chunk replays before subsequent live traffic.
+      if (complete || !this.joinWaits.has(groupJid)) {
+        await this.notifyHistory(groupJid, count);
+        if (complete && (epochs.get(groupJid) ?? 0) === (this.groupEpochs.get(groupJid) ?? 0)) await this.releaseJoinWait(groupJid);
       }
     }
   }
@@ -612,24 +697,23 @@ export class WhatsAppConnection {
         const parsed = this.parseMessage(message, sock.user);
         if (!parsed) continue;
 
-        // Capture once even before activation. A duplicate of an old, capture-
-        // only message must not become a backfill after the first tag/rejoin.
+        const wait = parsed.isGroup ? this.joinWaits.get(parsed.chatJid) : null;
+        if (wait) {
+          if (wait.epoch === (epochs.get(parsed.chatJid) ?? 0)) wait.messages.push(message);
+          continue; // No media allocation, and do not block history on this queue.
+        }
         const captured = this.messages.capture(parsed);
         if (!captured && parsed.isGroup) continue;
-        if (parsed.fromMe && (!parsed.isGroup ||
-          this.outboundLog.isGatewayMessage(parsed.connectionId, parsed.chatJid, parsed.messageId))) continue;
+        if (parsed.fromMe && this.outboundLog.isGatewayMessage(parsed.connectionId, parsed.chatJid, parsed.messageId)) continue;
         const stale = () => parsed.isGroup &&
           (epochs.get(parsed.chatJid) ?? 0) !== (this.groupEpochs.get(parsed.chatJid) ?? 0);
         if (stale()) continue;
 
-        // Group media is marker + caption, with no attachment allocation.
-        // Preserve transient file delivery for DMs.
-        if (!parsed.isGroup) {
-          const { status, media } = await this.media.download(message, sock);
-          parsed.mediaStatus = status;
-          parsed.media = media;
-        }
-        if (stale()) continue;
+        const normalized = { ...message, message: normalizeMessageContent(message.message) };
+        const { status, media } = await this.media.download(normalized, sock);
+        parsed.mediaStatus = status;
+        parsed.media = media;
+        if (stale()) { parsed.media = null; continue; }
         try {
           // Await the handoff so this upsert batch does not retain several
           // attachment buffers while PromptQL accepts/retries earlier ones.
@@ -691,7 +775,12 @@ export class WhatsAppConnection {
       });
     }
 
-    const text = extractText(m);
+    const normalized = { ...m, message: normalizeMessageContent(m.message) };
+    const metadata = z.object({
+      pushName: z.string().nullish(),
+      message: z.object({ audioMessage: z.object({ ptt: z.boolean().nullish() }).nullish() }).nullish(),
+    }).safeParse(normalized);
+    const text = extractText(normalized);
     const ts = Number(m.messageTimestamp ?? 0) * 1000 || Date.now();
     return {
       connectionId: this.config.connectionId,
@@ -701,7 +790,10 @@ export class WhatsAppConnection {
       messageId,
       ts,
       text,
-      msgType: classifyMessage(m),
+      msgType: classifyMessage(normalized),
+      pushName: metadata.success ? metadata.data.pushName : null,
+      fileName: documentFileName(normalized),
+      ptt: metadata.success ? Boolean(metadata.data.message?.audioMessage?.ptt) : false,
       mediaStatus: "none",
       media: null,
       isGroup,

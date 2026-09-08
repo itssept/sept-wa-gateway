@@ -46,11 +46,12 @@ export function createContext(config: Config, db?: Database, log?: Logger): AppC
   const audit = new AuditLog(database);
   const outboundLog = new OutboundLog(database);
   const workflows = new McpWorkflowRepo(database);
-  const chatBots = new ChatBotRepo(database);
+  const chatBots = new ChatBotRepo(database, config.dataEncryptionKey);
   const messages = new MessageStore(database);
   const adapter = new PromptQlAdapter({
     config,
-    getToken: (shopperId) => credentials.getActiveToken(shopperId),
+    getToken: (shopperId, role) => credentials.getActiveToken(shopperId, role),
+    getClientToken: () => gatewaySettings.getClientToken(),
     log: rootLog.child({ component: "promptql" }),
   });
   const resolver = new ShopperResolver(shoppers, mappings, credentials);

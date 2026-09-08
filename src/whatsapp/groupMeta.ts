@@ -34,6 +34,18 @@ interface GroupMetadataRow {
   updated_at: string;
 }
 
+const MetadataSchema = z.object({
+  id: z.string().regex(/^[^@\s]+@g\.us$/),
+  subject: z.string().nullish(),
+  participants: z.array(z.object({
+    id: z.string().regex(/^[^@\s]+@[^@\s]+$/),
+    phoneNumber: z.string().nullish(), admin: z.string().nullish(),
+  }).passthrough()),
+}).passthrough();
+const ParticipantsSchema = z.array(z.object({
+  jid: z.string(), phone_e164: z.string().nullable(), admin: z.boolean(),
+}));
+
 function toParticipants(meta: GroupMetadata): GroupParticipant[] {
   return meta.participants.map((p) => ({
     jid: p.id,
@@ -48,6 +60,7 @@ function toParticipants(meta: GroupMetadata): GroupParticipant[] {
 export class GroupMetaStore {
   private readonly log: Logger;
   private readonly removed = new Set<string>();
+  private readonly versions = new Map<string, number>();
 
   constructor(
     private readonly db: Database,
@@ -60,8 +73,14 @@ export class GroupMetaStore {
   remove(connectionId: string, groupJid: string): void {
     z.tuple([z.string().min(1), z.string().min(1)]).parse([connectionId, groupJid]);
     this.removed.add(JSON.stringify([connectionId, groupJid]));
-    this.db.run("DELETE FROM whatsapp_group_metadata WHERE connection_id = ? AND group_jid = ?",
-      [connectionId, groupJid]);
+    this.invalidate(connectionId, groupJid);
+  }
+
+  invalidate(connectionId: string, groupJid: string): void {
+    z.tuple([z.string().min(1), z.string().min(1)]).parse([connectionId, groupJid]);
+    const key = JSON.stringify([connectionId, groupJid]);
+    this.versions.set(key, (this.versions.get(key) ?? 0) + 1);
+    this.db.run("DELETE FROM whatsapp_group_metadata WHERE connection_id = ? AND group_jid = ?", [connectionId, groupJid]);
   }
 
   allowFetch(connectionId: string, groupJid: string): void {
@@ -72,6 +91,7 @@ export class GroupMetaStore {
   upsert(connectionId: string, meta: GroupMetadata): void {
     // A metadata fetch begun before removal may finish afterwards.
     if (this.removed.has(JSON.stringify([connectionId, meta.id]))) return;
+    MetadataSchema.parse(meta);
     const participants = toParticipants(meta);
     this.db.run(
       `INSERT INTO whatsapp_group_metadata
@@ -122,7 +142,7 @@ export class GroupMetaStore {
     return {
       groupJid: row.group_jid,
       subject: row.subject,
-      participants: row.participants ? JSON.parse(row.participants) : [],
+      participants: row.participants ? ParticipantsSchema.parse(JSON.parse(row.participants)) : [],
       updatedAt: row.updated_at,
     };
   }
@@ -141,7 +161,10 @@ export class GroupMetaStore {
     const cached = this.read(connectionId, groupJid);
     if (cached && !this.isStale(cached.updatedAt)) return cached;
     try {
+      const key = JSON.stringify([connectionId, groupJid]);
+      const version = this.versions.get(key) ?? 0;
       const fresh = await sock.groupMetadata(groupJid);
+      if (version !== (this.versions.get(key) ?? 0)) return null;
       this.upsert(connectionId, fresh);
       return this.read(connectionId, groupJid);
     } catch (err) {

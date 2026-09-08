@@ -136,6 +136,7 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
           });
           return status;
         })();
+        ctx.adapter.invalidate({ role: "client" });
         return json(setup);
       }
       if (resource === "shoppers") {
@@ -270,7 +271,8 @@ async function handleShoppers(
       });
       return { shopper, created, cred, paCred };
     })();
-    ctx.adapter.invalidate(shopper.id);
+    ctx.adapter.invalidate({ shopperId: shopper.id, role: "shopper" });
+    ctx.adapter.invalidate({ shopperId: shopper.id, role: "pa" });
     return json(
       { shopper, credential: cred, paCredential: paCred },
       created ? 201 : 200,
@@ -319,7 +321,7 @@ async function handleShoppers(
       label: parsed.data.role,
       serviceAccountId: parsed.data.serviceAccountId ?? null,
     });
-    ctx.adapter.invalidate(id); // drop any cached MCP session using the old token
+    ctx.adapter.invalidate({ shopperId: id, role: parsed.data.role }); // drop any cached MCP session using the old token
     ctx.audit.record("credential.rotate", {
       subjectType: "credential",
       subjectId: cred.id,
@@ -339,7 +341,7 @@ async function handleShoppers(
     const parsed = await readJson(req, RevokeCredential);
     if (!parsed.ok) return parsed.response;
     const revoked = ctx.credentials.revokeActive(id, parsed.data.role);
-    ctx.adapter.invalidate(id);
+    ctx.adapter.invalidate({ shopperId: id, role: parsed.data.role });
     ctx.audit.record("credential.revoke", {
       subjectType: "shopper",
       subjectId: id,

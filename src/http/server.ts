@@ -41,8 +41,9 @@ async function main(): Promise<void> {
     ctx.messages,
     {
       onInbound: (msg) => router?.handle(msg),
-      onSelfRemoved: (event) => router?.onSelfMembership(event),
-      onSelfAdded: (event) => router?.onSelfMembership(event),
+      onSelfRemoved: (event) => router?.onSelfMembership(event, "remove"),
+      onSelfAdded: (event) => router?.onSelfMembership(event, "add"),
+      onHistoryBatch: (event) => router?.onHistoryBatch(event),
       onLoggedOut: (connId) => {
         ctx.audit.record("connection.logged_out", {
           subjectType: "connection",
@@ -86,6 +87,11 @@ async function main(): Promise<void> {
     dispatcher,
     ctx.audit,
     ctx.log.child({ component: "inbound" }),
+    {
+      settings: ctx.gatewaySettings, messages: ctx.messages,
+      getGroup: (jid) => connection.routingGroup(jid),
+      prepareHistory: (row) => connection.prepareHistoryMessage(row),
+    },
   );
 
   const handle = makeHandler({ ctx, connection });

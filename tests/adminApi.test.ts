@@ -389,7 +389,8 @@ test("re-registration fills a legacy PA identity and updates both tokens without
   });
   expect(ctx.credentials.getActiveToken(shopper.id, "shopper")).toBe(registration.mcpToken);
   expect(ctx.credentials.getActiveToken(shopper.id, "pa")).toBe(registration.paMcpToken);
-  expect(invalidate).toHaveBeenCalledWith(shopper.id);
+  expect(invalidate).toHaveBeenCalledWith({ shopperId: shopper.id, role: "shopper" });
+  expect(invalidate).toHaveBeenCalledWith({ shopperId: shopper.id, role: "pa" });
   invalidate.mockRestore();
 });
 
@@ -414,4 +415,31 @@ test("failed PA credential write rolls back shopper and both credentials on crea
   expect(ctx.credentials.getActiveToken(created.shopper.id, "pa")).toBe(registration.paMcpToken);
   expect(ctx.credentials.listInfo(created.shopper.id)).toHaveLength(2);
   expect(ctx.audit.recent().filter((a) => a.action === "shopper.create")).toHaveLength(1);
+});
+
+test("setup, rotation and revocation invalidate only their exact posting identities", async () => {
+  const { ctx, handle, db } = makeTestApp();
+  const invalidate = spyOn(ctx.adapter, "invalidate");
+  try {
+    await setupGateway(handle);
+    expect(invalidate.mock.calls).toEqual([[{ role: "client" }]]);
+    invalidate.mockClear();
+    const body = await jsonBody(await adminReq(handle, "POST", "/api/v1/shoppers", registration));
+    const id = body.shopper.id;
+    expect(invalidate.mock.calls).toEqual([
+      [{ shopperId: id, role: "shopper" }], [{ shopperId: id, role: "pa" }],
+    ]);
+    for (const role of ["shopper", "pa"] as const) {
+      for (const operation of ["rotate", "revoke"]) {
+        invalidate.mockClear();
+        const res = await adminReq(handle, "POST", `/api/v1/shoppers/${id}/credential/${operation}`,
+          { role, mcpToken: `new-${role}-token` });
+        expect(res.status).toBe(200);
+        expect(invalidate.mock.calls).toEqual([[{ shopperId: id, role }]]);
+      }
+    }
+  } finally {
+    invalidate.mockRestore();
+    db.close();
+  }
 });

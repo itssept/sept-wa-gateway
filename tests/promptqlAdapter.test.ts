@@ -312,3 +312,42 @@ test("expired media can still be relayed as envelope text without a file", async
   expect(toolCalls[0]!.args.files).toBeUndefined();
   expect(toolCalls[0]!.args.query).toBe("[Client] no phone\n(image)");
 });
+
+test("shopper, PA, second shopper and Client use isolated sessions; invalidation never crosses roles", async () => {
+  const calls: Array<{ method: string; auth: string | null }> = [];
+  const tokens = new Map([["s:shopper", "shop-token"], ["s:pa", "pa-token"], ["b:shopper", "bob-token"]]);
+  let clientToken: string | null = "client-token";
+  globalThis.fetch = (async (_input: any, init: any) => {
+    const body = JSON.parse(init.body);
+    calls.push({ method: body.method, auth: new Headers(init.headers).get("Authorization") });
+    if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+    const result = body.method === "tools/call"
+      ? { structuredContent: { thread_id: "bot", thread_event_id: "event" } } : {};
+    return new Response(sseOf({ jsonrpc: "2.0", id: body.id, result }),
+      { headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  const a = new PromptQlAdapter({
+    config: cfg, getToken: (id, role) => tokens.get(`${id}:${role}`) ?? null, getClientToken: () => clientToken,
+  });
+  const shopper = { shopperId: "s", role: "shopper" } as const;
+  const pa = { shopperId: "s", role: "pa" } as const;
+  const client = { role: "client" } as const;
+  for (const identity of [shopper, pa, "b", client, shopper, pa, client]) await a.ask(identity, { query: "x" });
+  expect(calls.filter((c) => c.method === "initialize").map((c) => c.auth)).toEqual([
+    "pat shop-token", "pat pa-token", "pat bob-token", "pat client-token",
+  ]);
+  tokens.set("s:pa", "new-pa"); a.invalidate(pa);
+  await a.ask(pa, { query: "x" }); await a.ask(shopper, { query: "x" });
+  expect(calls.filter((c) => c.method === "initialize").at(-1)!.auth).toBe("pat new-pa");
+  tokens.delete("s:pa"); a.invalidate(pa);
+  const before = calls.length;
+  await expect(a.ask(pa, { query: "x" })).rejects.toThrow("no active MCP credential");
+  expect(calls).toHaveLength(before);
+  clientToken = "new-client"; a.invalidate(client);
+  await a.ask(client, { query: "x" });
+  expect(calls.filter((c) => c.method === "initialize").at(-1)!.auth).toBe("pat new-client");
+  clientToken = null;
+  await expect(a.ask(client, { query: "x" })).rejects.toThrow("no active MCP credential");
+  await a.ask(shopper, { query: "x" });
+  expect(calls.at(-1)!.auth).toBe("pat shop-token");
+});

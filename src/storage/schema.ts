@@ -261,4 +261,35 @@ export const MIGRATIONS: Migration[] = [
         WHERE is_history = 1 AND relayed_at IS NULL;
     `,
   },
+  {
+    version: 8,
+    name: "fixed_chat_owner",
+    sql: /* sql */ `
+      CREATE TABLE chat_bot_v8 (
+        connection_id TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        shopper_id TEXT,
+        thread_id TEXT NOT NULL,
+        room_name TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        relay_paused_at TEXT,
+        pending_post_encrypted BLOB,
+        PRIMARY KEY (connection_id, chat_jid)
+      );
+      INSERT INTO chat_bot_v8
+        (connection_id, chat_jid, shopper_id, thread_id, room_name, created_at, updated_at, relay_paused_at)
+        SELECT connection_id, chat_jid, shopper_id, thread_id, room_name, created_at, updated_at, relay_paused_at
+        FROM chat_bot;
+      DROP TABLE chat_bot;
+      ALTER TABLE chat_bot_v8 RENAME TO chat_bot;
+      CREATE TABLE chat_group_membership (
+        connection_id TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        present INTEGER NOT NULL CHECK (present IN (0, 1)),
+        added_by_jid TEXT,
+        PRIMARY KEY (connection_id, chat_jid)
+      );
+    `,
+  },
 ];
