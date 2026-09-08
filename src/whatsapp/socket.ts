@@ -32,7 +32,7 @@ import { Boom } from "@hapi/boom";
 import type { Database } from "bun:sqlite";
 import type { Config } from "../config.ts";
 import { useSqliteAuthState, type AuthStateHandle } from "./authState.ts";
-import { AntiBanQueue, type SendContext } from "./antiBan.ts";
+import { AntiBanQueue, PacingProfileSchema, type PacingProfile, type SendContext } from "./antiBan.ts";
 import { GroupMetaStore } from "./groupMeta.ts";
 import { rootLogger, type Logger } from "../logger.ts";
 import type { MessageStore } from "../storage/messageStore.ts";
@@ -589,11 +589,16 @@ export class WhatsAppConnection {
     chatJid: string,
     text: string,
     options: {
+      pacingProfile?: PacingProfile;
       beforeSend?: () => boolean;
       onMessageId?: (id: string) => void;
     } = {},
   ): Promise<string> {
-    z.object({ chatJid: z.string().min(1), text: z.string().min(1) }).parse({ chatJid, text });
+    const { pacingProfile } = z.object({
+      chatJid: z.string().min(1),
+      text: z.string().min(1),
+      pacingProfile: PacingProfileSchema.optional(),
+    }).parse({ chatJid, text, pacingProfile: options.pacingProfile });
     const sock = this.live.sock;
     if (!sock || this.live.status !== "linked") {
       throw new Error(`connection ${this.config.connectionId} is not linked`);
@@ -602,6 +607,7 @@ export class WhatsAppConnection {
       connectionId: this.config.connectionId,
       chatJid,
       textLength: text.length,
+      pacingProfile,
       linkedAtMs: this.live.linkedAtMs,
       setComposing: async () => {
         await sock.sendPresenceUpdate("composing", chatJid);

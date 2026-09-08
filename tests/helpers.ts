@@ -25,6 +25,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     deviceLabel: undefined,
     sendRatePerSec: 100,
     warmupDays: 0,
+    paReplyDelayMinMs: 2_000,
+    paReplyDelayMaxMs: 5_000,
     maxPendingSendsPerConnection: 100,
     groupMetaTtlMs: 3_600_000,
     messageRetentionDays: 90,

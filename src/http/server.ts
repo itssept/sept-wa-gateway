@@ -24,6 +24,8 @@ async function main(): Promise<void> {
   const antiBan = new AntiBanQueue({
     sendRatePerSec: config.sendRatePerSec,
     warmupDays: config.warmupDays,
+    paReplyDelayMinMs: config.paReplyDelayMinMs,
+    paReplyDelayMaxMs: config.paReplyDelayMaxMs,
     maxPendingPerConnection: config.maxPendingSendsPerConnection,
   });
 

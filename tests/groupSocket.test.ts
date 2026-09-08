@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { SendContext } from "../src/whatsapp/antiBan.ts";
 import { WhatsAppConnection, type InboundMessage } from "../src/whatsapp/socket.ts";
 import { makeTestApp } from "./helpers.ts";
 import { GroupMetaStore } from "../src/whatsapp/groupMeta.ts";
@@ -9,10 +10,12 @@ function setup() {
   const app = makeTestApp();
   const inbound: InboundMessage[] = [];
   const events: string[] = [];
+  const queued: SendContext[] = [];
   let beforePacedSend: (() => void) | undefined;
   const conn = new WhatsAppConnection(
     app.db, app.ctx.config,
-    { enqueue: async (_ctx: unknown, send: () => Promise<string>) => {
+    { enqueue: async (ctx: SendContext, send: () => Promise<string>) => {
+      queued.push(ctx);
       beforePacedSend?.(); return send();
     } } as never,
     app.ctx.messages,
@@ -39,7 +42,7 @@ function setup() {
   // Isolate event handlers from network login; the real socket owns these fields.
   (conn as any).live.sock = sock;
   (conn as any).live.status = "linked";
-  return { ...app, conn, sock, inbound, events, sent,
+  return { ...app, conn, sock, inbound, events, sent, queued,
     setBeforeSend: (hook: () => void) => { beforePacedSend = hook; } };
 }
 function message(id: string, fromMe = false, jid = GROUP) {
@@ -126,11 +129,12 @@ test("gateway send ID is recorded before an immediate echo and remains identifia
   db.close();
 });
 
-test("send guard is checked after anti-ban pacing", async () => {
+test("PA send guard is checked after anti-ban pacing", async () => {
   const { conn, sent, ctx, setBeforeSend, db } = setup();
   let allowed = true;
   setBeforeSend(() => { allowed = false; });
   await expect(conn.sendText(GROUP, "answer", {
+    pacingProfile: "pa_reply",
     beforeSend: () => allowed,
     onMessageId: (id) => ctx.outboundLog.recordGatewayMessage("test-conn", GROUP, id),
   })).rejects.toThrow("chat_left");
@@ -150,4 +154,31 @@ test("a metadata fetch started before removal cannot repopulate the removed grou
   await pending;
   expect(groups.read("test-conn", GROUP)).toBeNull();
   db.close();
+});
+for (const pacingProfile of [undefined, "default", "pa_reply"] as const) {
+  test(`socket forwards ${pacingProfile ?? "omitted"} pacing into the queue`, async () => {
+    const { conn, queued, ctx, db } = setup();
+    try {
+      await conn.sendText(GROUP, "answer", {
+        pacingProfile,
+        onMessageId: (id) => ctx.outboundLog.recordGatewayMessage("test-conn", GROUP, id),
+      });
+      expect(queued).toHaveLength(1);
+      expect(queued[0]!.pacingProfile).toBe(pacingProfile);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test("socket rejects an invalid pacing profile before queueing", async () => {
+  const { conn, queued, db } = setup();
+  try {
+    await expect(conn.sendText(GROUP, "answer", {
+      pacingProfile: "unknown" as never,
+    })).rejects.toThrow();
+    expect(queued).toHaveLength(0);
+  } finally {
+    db.close();
+  }
 });

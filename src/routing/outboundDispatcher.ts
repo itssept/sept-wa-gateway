@@ -17,6 +17,7 @@ import type { PromptQlAdapter } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { WhatsAppConnection } from "../whatsapp/socket.ts";
+import type { PacingProfile } from "../whatsapp/antiBan.ts";
 import type { Config } from "../config.ts";
 import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
@@ -30,6 +31,8 @@ export interface DispatchInput {
   claimToken: string;
   threadId: string;
   threadEventId: string | null;
+  /** Routing may opt PA replies to clients into the extra pause. */
+  pacingProfile?: PacingProfile;
 }
 
 export class OutboundDispatcher {
@@ -79,6 +82,7 @@ export class OutboundDispatcher {
     this.workflows.markDone(input.workflowId, answer);
     try {
       const ref = await this.connection.sendText(input.chatJid, answer, {
+        pacingProfile: input.pacingProfile,
         beforeSend: canSend,
         onMessageId: (id) => this.outboundLog.recordGatewayMessage(input.connectionId, input.chatJid, id),
       });

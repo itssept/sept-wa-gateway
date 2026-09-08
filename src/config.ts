@@ -72,6 +72,10 @@ const EnvSchema = z.object({
   // Anti-ban.
   WHATSAPP_SEND_RATE_PER_SEC: z.coerce.number().positive().default(1),
   WHATSAPP_WARMUP_DAYS: z.coerce.number().nonnegative().default(3),
+  // Extra pause before typing for opt-in PA replies to clients. Keep within
+  // setTimeout's range so an oversized value cannot wrap into an immediate send.
+  WHATSAPP_PA_REPLY_DELAY_MIN_MS: z.coerce.number().int().nonnegative().max(2_147_483_647).default(2_000),
+  WHATSAPP_PA_REPLY_DELAY_MAX_MS: z.coerce.number().int().nonnegative().max(2_147_483_647).default(5_000),
   WHATSAPP_MAX_PENDING_SENDS_PER_CONNECTION: z.coerce
     .number()
     .int()
@@ -95,6 +99,9 @@ const EnvSchema = z.object({
   // Overall ceiling for the blocking response wait (get_latest_promptql_thread_
   // response long-polls internally; we re-call it on `analyzing` until this).
   PROMPTQL_RESPONSE_MAX_MS: z.coerce.number().int().positive().default(180_000),
+}).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
+  path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
+  message: "must be greater than or equal to WHATSAPP_PA_REPLY_DELAY_MIN_MS",
 });
 
 export interface Config {
@@ -111,6 +118,8 @@ export interface Config {
 
   sendRatePerSec: number;
   warmupDays: number;
+  paReplyDelayMinMs: number;
+  paReplyDelayMaxMs: number;
   maxPendingSendsPerConnection: number;
   groupMetaTtlMs: number;
   messageRetentionDays: number;
@@ -154,6 +163,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     sendRatePerSec: e.WHATSAPP_SEND_RATE_PER_SEC,
     warmupDays: e.WHATSAPP_WARMUP_DAYS,
+    paReplyDelayMinMs: e.WHATSAPP_PA_REPLY_DELAY_MIN_MS,
+    paReplyDelayMaxMs: e.WHATSAPP_PA_REPLY_DELAY_MAX_MS,
     maxPendingSendsPerConnection: e.WHATSAPP_MAX_PENDING_SENDS_PER_CONNECTION,
     groupMetaTtlMs: e.WHATSAPP_GROUP_META_TTL_MS,
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
