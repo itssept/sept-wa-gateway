@@ -12,8 +12,6 @@ export function mediaLabel(msg: InboundMessage): ClientEnvelopeInput["media"] {
 export function clientQuery(msg: InboundMessage): string {
   return formatClientEnvelope({
     displayName: msg.pushName,
-    phoneE164: msg.senderPhoneE164,
-    lid: msg.senderJid.endsWith("@lid") ? msg.senderJid : null,
     text: msg.text,
     media: mediaLabel(msg),
   });
