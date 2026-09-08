@@ -19,7 +19,7 @@ test("gateway setup and both shopper roles survive restart, encrypted with the e
     const settings = new GatewaySettingsRepo(db, ENC);
     const creds = new CredentialStore(db, ENC);
     const { shopper } = new ShopperRepo(db).register("R", "+14155551212", "public-shopper");
-    settings.set("client-persist-secret", "public-common");
+    settings.set("client-persist-secret", "public-common", "sa-client");
     creds.setActive(shopper.id, "shopper-persist-secret", { label: "shopper" });
     creds.setActive(shopper.id, "pa-persist-secret", { label: "pa" });
     for (const row of db.query<{ token_encrypted: Uint8Array }, []>(
@@ -34,7 +34,11 @@ test("gateway setup and both shopper roles survive restart, encrypted with the e
     const reopened = openDatabase(path);
     const restoredSettings = new GatewaySettingsRepo(reopened, ENC);
     const restoredCreds = new CredentialStore(reopened, ENC);
-    expect(restoredSettings.getStatus()).toEqual({ setupComplete: true, commonRoomName: "public-common" });
+    expect(restoredSettings.getStatus()).toEqual({
+      setupComplete: true,
+      commonRoomName: "public-common",
+      clientServiceAccountId: "sa-client",
+    });
     expect(restoredSettings.getClientToken()).toBe("client-persist-secret");
     expect(restoredCreds.getActiveToken(shopper.id, "shopper")).toBe("shopper-persist-secret");
     expect(restoredCreds.getActiveToken(shopper.id, "pa")).toBe("pa-persist-secret");
@@ -66,7 +70,9 @@ test("migration 6 preserves legacy shoppers without inventing a PA token and is 
       expect(creds.getActiveInfo(shopper.id, "shopper")).toEqual(oldCred);
       expect(creds.getActiveToken(shopper.id, "shopper")).toBe("legacy-shopper-token");
       expect(creds.getActiveToken(shopper.id, "pa")).toBeNull();
+      // Setup not done: the client SA id key is omitted entirely.
       expect(settings.getStatus()).toEqual({ setupComplete: false, commonRoomName: null });
+      expect(settings.getStatus()).not.toHaveProperty("clientServiceAccountId");
       expect(settings.getClientToken()).toBeNull();
       expect(db.query<{ n: number }, []>(
         "SELECT COUNT(1) AS n FROM _gateway_migrations WHERE version = 6",
@@ -84,10 +90,16 @@ test("storage rejects invalid gateway setup input and validates persisted settin
     const settings = new GatewaySettingsRepo(db, ENC);
     expect(() => settings.set("", "room")).toThrow();
     expect(() => settings.set("valid-client-token", " ")).toThrow();
+    // Not set up: the client SA id key is omitted entirely.
     expect(settings.getStatus()).toEqual({ setupComplete: false, commonRoomName: null });
+    expect(settings.getStatus()).not.toHaveProperty("clientServiceAccountId");
+    settings.set("valid-client-token", "public-room", "sa-client");
+    expect(settings.getStatus().clientServiceAccountId).toBe("sa-client");
+    // Set up without an SA id: key is present but null (all settings replace together).
     settings.set("valid-client-token", "public-room");
+    expect(settings.getStatus()).toHaveProperty("clientServiceAccountId", null);
     expect(() => db.run(
-      "INSERT INTO gateway_settings VALUES (2, X'00', 'other', 'now', 'now')",
+      "INSERT INTO gateway_settings VALUES (2, X'00', 'other', NULL, 'now', 'now')",
     )).toThrow();
     db.run("UPDATE gateway_settings SET common_room_name = '' WHERE id = 1");
     expect(() => settings.getStatus()).toThrow();

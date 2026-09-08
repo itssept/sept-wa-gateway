@@ -14,6 +14,11 @@ export type CredentialRole = z.infer<typeof CredentialRoleSchema>;
 export interface GatewaySetupStatus {
   setupComplete: boolean;
   commonRoomName: string | null;
+  /**
+   * Non-secret PromptQL service-account identifier for the client. Present only
+   * when setup is complete; null when setup is done but no id was configured.
+   */
+  clientServiceAccountId?: string | null;
 }
 
 export type ShopperStatus = "enabled" | "disabled";

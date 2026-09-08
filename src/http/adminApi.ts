@@ -2,7 +2,7 @@
  * Management API (spec direction: resource-oriented, versioned). Routes:
  *
  *   GET    /health                                  (unauthenticated)
- *   POST   /api/v1/setup                            set Client SA token + common room
+ *   POST   /api/v1/setup                            set Client SA token (+ optional id) + common room
  *   POST   /api/v1/shoppers                         register shopper + shopper/PA credentials
  *   GET    /api/v1/shoppers                         list shoppers (non-secret)
  *   GET    /api/v1/shoppers/:id                     read one (non-secret)
@@ -129,7 +129,11 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
         const parsed = await readJson(req, SetupGateway);
         if (!parsed.ok) return parsed.response;
         const setup = ctx.db.transaction(() => {
-          const status = ctx.gatewaySettings.set(parsed.data.clientMcpToken, parsed.data.commonRoomName);
+          const status = ctx.gatewaySettings.set(
+            parsed.data.clientMcpToken,
+            parsed.data.commonRoomName,
+            parsed.data.clientServiceAccountId ?? null,
+          );
           ctx.audit.record("gateway.setup", {
             subjectType: "gateway",
             detail: { clientTokenFingerprint: sha256Hex(parsed.data.clientMcpToken) },

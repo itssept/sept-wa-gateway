@@ -231,8 +231,10 @@ test("setup and status require admin auth, and registration is gated until setup
     expect((await adminReq(handle, "POST", "/api/v1/setup", setupInput, token)).status).toBe(401);
     expect((await adminReq(handle, "GET", "/api/v1/status", undefined, token)).status).toBe(401);
   }
-  expect(await jsonBody(await adminReq(handle, "GET", "/api/v1/status")))
-    .toMatchObject({ setupComplete: false, commonRoomName: null });
+  const preSetupStatus = await jsonBody(await adminReq(handle, "GET", "/api/v1/status"));
+  expect(preSetupStatus).toMatchObject({ setupComplete: false, commonRoomName: null });
+  // Before setup there is no client identity: the SA id key is omitted entirely.
+  expect(preSetupStatus).not.toHaveProperty("clientServiceAccountId");
   const blocked = await adminReq(handle, "POST", "/api/v1/shoppers", registration);
   expect(blocked.status).toBe(409);
   expect((await jsonBody(blocked)).error).toContain("/api/v1/setup");
@@ -284,11 +286,21 @@ test("setup updates one encrypted record and status, responses, logs and audits 
   const response = await adminReq(handle, "POST", "/api/v1/setup", {
     clientMcpToken: nextToken,
     commonRoomName: "new-common",
+    clientServiceAccountId: "sa-client",
   });
   expect(response.status).toBe(200);
-  expect(await jsonBody(response)).toEqual({ setupComplete: true, commonRoomName: "new-common" });
+  expect(await jsonBody(response)).toEqual({
+    setupComplete: true,
+    commonRoomName: "new-common",
+    clientServiceAccountId: "sa-client",
+  });
   const status = await jsonBody(await adminReq(handle, "GET", "/api/v1/status"));
-  expect(status).toMatchObject({ setupComplete: true, commonRoomName: "new-common", mcpConfigured: true });
+  expect(status).toMatchObject({
+    setupComplete: true,
+    commonRoomName: "new-common",
+    clientServiceAccountId: "sa-client",
+    mcpConfigured: true,
+  });
   expect(ctx.gatewaySettings.getClientToken()).toBe(nextToken);
   const rows = db.query<{ client_token_encrypted: Uint8Array }, []>(
     "SELECT client_token_encrypted FROM gateway_settings",

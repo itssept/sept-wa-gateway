@@ -155,6 +155,7 @@ ADMIN=<GATEWAY_ADMIN_TOKEN>
 BASE=http://localhost:8790
 
 # 1. Configure the gateway Client SA and common public room.
+#    Optional: add "clientServiceAccountId":"<id>" (non-secret, shown in /status).
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/setup \
   -d '{"clientMcpToken":"<client-token>","commonRoomName":"sept-common"}'

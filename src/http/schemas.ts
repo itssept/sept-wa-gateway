@@ -14,6 +14,9 @@ const RoomName = z.string().min(1).max(80)
 export const SetupGateway = z.object({
   clientMcpToken: McpToken,
   commonRoomName: RoomName,
+  // Optional non-secret PromptQL service-account identifier for the client,
+  // mirroring the shopper/PA serviceAccountId. Surfaced in GET /api/v1/status.
+  clientServiceAccountId: z.string().max(256).optional(),
 }).strict();
 
 export const CreateShopper = z.object({

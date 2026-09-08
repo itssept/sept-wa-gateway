@@ -292,4 +292,14 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    name: "client_service_account_id",
+    sql: /* sql */ `
+      -- Non-secret PromptQL service-account identifier for the client identity,
+      -- mirroring shopper_credential.service_account_id. Nullable: existing
+      -- setups keep their client token and simply have no SA id until re-setup.
+      ALTER TABLE gateway_settings ADD COLUMN client_service_account_id TEXT;
+    `,
+  },
 ];

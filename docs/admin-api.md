@@ -93,21 +93,26 @@ permissions. The room must be accessible to the service accounts that use it.
 |---|---|---|---|
 | `clientMcpToken` | string (8–4096) | yes | Gateway-wide Client SA token. Encrypted under `DATA_ENCRYPTION_KEY`, never returned. |
 | `commonRoomName` | string (1–80) | yes | Existing public PromptQL room for unqualified chats. Stored verbatim. |
+| `clientServiceAccountId` | string (≤256) | no | Non-secret Client SA id for audit/attribution. Returned in setup and status responses. |
 
-Blank or missing values return `422`. A failed update leaves both old values
-unchanged. The settings survive restarts in the gateway SQLite database.
+Blank or missing required values return `422`. A failed update leaves the old
+values unchanged. Because each setup replaces all values atomically, omitting
+`clientServiceAccountId` on a later setup clears any previously stored id. The
+settings survive restarts in the gateway SQLite database.
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/setup \
-  -d '{"clientMcpToken":"<client-mcp-scoped-token>","commonRoomName":"sept-common"}'
+  -d '{"clientMcpToken":"<client-mcp-scoped-token>","commonRoomName":"sept-common","clientServiceAccountId":"client-sa"}'
 ```
 
 Response:
 
 ```json
-{ "setupComplete": true, "commonRoomName": "sept-common" }
+{ "setupComplete": true, "commonRoomName": "sept-common", "clientServiceAccountId": "client-sa" }
 ```
+
+`clientServiceAccountId` is `null` when setup completed without an id.
 
 Setup enables Client relays and replaces the cached Client MCP session.
 Missing Client setup drops Client traffic with an audit/log. It does not create
@@ -330,11 +335,14 @@ Connection view plus counts and non-secret setup status:
   "mappings": 5,
   "mcpConfigured": true,
   "setupComplete": true,
-  "commonRoomName": "sept-common"
+  "commonRoomName": "sept-common",
+  "clientServiceAccountId": "client-sa"
 }
 ```
 
-Before setup, `setupComplete` is `false` and `commonRoomName` is `null`.
-`setupComplete` means both values have been stored, not that the token or room
-permissions have been verified against PromptQL. The Client SA token is never
-included.
+Before setup, `setupComplete` is `false`, `commonRoomName` is `null`, and
+`clientServiceAccountId` is **omitted entirely** (there is no client identity
+yet). Once set up, the key is always present: it holds the configured id, or
+`null` if setup completed without one. `setupComplete` means both required
+values have been stored, not that the token or room permissions have been
+verified against PromptQL. The Client SA token is never included.
