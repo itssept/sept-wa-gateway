@@ -135,3 +135,47 @@ test("HTTP 404 triggers one reinitialize then retry", async () => {
   const s = new McpSession(OPTS, "token");
   expect(await s.listTools()).toEqual([]);
 });
+
+
+test("attachment request is sent as JSON without changing binary base64 or force_skip", async () => {
+  const { calls } = scriptFetch([
+    { body: { jsonrpc: "2.0", id: 1, result: {} } },
+    { status: 202 },
+    { body: { jsonrpc: "2.0", id: 2, result: { structuredContent: { thread_id: "bot" } } } },
+  ]);
+  const args = {
+    query: "(image)", agent_response: "force_skip",
+    files: [{ file_name: "image.jpg", mime_type: "image/jpeg", content_base64: "AAH+/w==" }],
+  };
+  const s = new McpSession(OPTS, "token");
+  await s.callTool("ask_promptql", args);
+  const body = await calls[2]!.json() as { params: { arguments: unknown } };
+  expect(body.params.arguments).toEqual(args);
+});
+
+test.each([0, 1])("request byte limit counts the complete UTF-8 JSON body (over by %s)", async (overBy) => {
+  const { calls } = scriptFetch([
+    { body: { jsonrpc: "2.0", id: 1, result: {} } },
+    { status: 202 },
+    { body: { jsonrpc: "2.0", id: 2, result: {} } },
+  ]);
+  const args = {
+    query: "é", agent_response: "force_skip",
+    files: [{ file_name: "file.bin", mime_type: "application/octet-stream", content_base64: "" }],
+  };
+  const overhead = Buffer.byteLength(JSON.stringify({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "ask_promptql", arguments: args },
+  }));
+  // This generic transport test isolates total JSON size, not file validation.
+  args.files[0]!.content_base64 = "A".repeat(10 * 1024 * 1024 - overhead + overBy);
+  const s = new McpSession(OPTS, "token");
+  if (overBy) {
+    await expect(s.callTool("ask_promptql", args)).rejects.toThrow("10 MiB");
+    expect(calls).toHaveLength(2); // handshake only; no retry or oversized POST
+  } else {
+    await s.callTool("ask_promptql", args);
+    expect(calls).toHaveLength(3);
+    expect(Buffer.byteLength(await calls[2]!.text())).toBe(10 * 1024 * 1024);
+  }
+});

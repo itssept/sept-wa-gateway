@@ -88,3 +88,23 @@ test("records expired downloads as an honest availability gap", async () => {
   );
   expect(result).toEqual({ status: "expired", media: null });
 });
+
+
+test.each([
+  ["invoice_0912.pdf", "invoice_0912.pdf"],
+  ["../../invoice.pdf", "invoice.pdf"],
+  ["C:\\private\\invoice.pdf", "invoice.pdf"],
+  ["invoice\n.pdf", "invoice_.pdf"],
+  ["...", "..."],
+  ["..", undefined],
+  [null, undefined],
+  [42, undefined],
+])("document download preserves a safe original filename: %s", async (fileName, expected) => {
+  const downloader = new TransientMediaDownloader(1024, log, implementation(Buffer.from("pdf")));
+  const result = await downloader.download(message({
+    documentMessage: { mimetype: "application/pdf", fileName },
+  }), socket);
+  expect(result.status).toBe("ready");
+  expect(result.media?.fileName).toBe(expected);
+  expect(result.media?.bytes.toString()).toBe("pdf");
+});

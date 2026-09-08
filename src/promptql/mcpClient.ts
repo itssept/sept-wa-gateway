@@ -19,6 +19,15 @@
  * token and is NEVER logged.
  */
 
+import { z } from "zod";
+
+// Match the server's default 10 MiB request budget, including base64 overhead.
+// The raw download cap is separate; query/metadata can still exceed this limit.
+const McpRequestBodySchema = z.string().refine(
+  (body) => Buffer.byteLength(body, "utf8") <= 10 * 1024 * 1024,
+  "MCP request exceeds the 10 MiB limit",
+);
+
 export interface McpClientOptions {
   endpoint: string;
   authScheme: string; // e.g. "pat"
@@ -182,6 +191,11 @@ export class McpSession {
     // Only send a session id if the server actually gave us one.
     if (this.sessionId) headers["Mcp-Session-Id"] = this.sessionId;
 
+    const serialized = McpRequestBodySchema.safeParse(JSON.stringify(body));
+    if (!serialized.success) {
+      throw new McpError("MCP request exceeds the 10 MiB limit", "protocol");
+    }
+
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.opts.timeoutMs);
     let response: Response;
@@ -189,7 +203,7 @@ export class McpSession {
       response = await fetch(this.opts.endpoint, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body: serialized.data,
         signal: ctrl.signal,
       });
     } catch (err) {

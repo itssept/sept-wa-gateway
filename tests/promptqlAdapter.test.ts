@@ -4,8 +4,11 @@
  */
 
 import { test, expect, afterEach } from "bun:test";
-import { PromptQlAdapter } from "../src/promptql/promptqlAdapter.ts";
+import { PromptQlAdapter, AskSubmissionError, promptQlFileFromMedia } from "../src/promptql/promptqlAdapter.ts";
 import { testConfig } from "./helpers.ts";
+import { TransientMediaDownloader } from "../src/whatsapp/media.ts";
+import { createLogger } from "../src/logger.ts";
+import type { WAMessage } from "baileys";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -187,4 +190,125 @@ test("new MCP fields and returned bot handle are validated", async () => {
   await expect(a.ask("s", { query: "hello", projectName: "" })).rejects.toThrow();
   expect(toolCalls).toHaveLength(0);
   await expect(a.ask("s", { query: "hello" })).rejects.toThrow("invalid bot handle");
+});
+
+
+test.each([null, "existing-bot"])("force_skip carries downloaded media on bot %s without polling", async (threadId) => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: {
+      status: "success", thread_id: threadId ?? "new-bot", thread_event_id: "event",
+    } } }],
+  });
+  const a = new PromptQlAdapter(deps);
+  const bytes = Buffer.from([0, 1, 254, 255]);
+  const file = promptQlFileFromMedia({
+    bytes, sizeBytes: bytes.length, mime: "application/pdf", fileName: "invoice_0912.pdf",
+  }, "fallback.pdf");
+  await a.ask("client-sa", {
+    query: "[Client] Priya Sharma, +447700900123\n(document: invoice_0912.pdf)",
+    threadId, roomName: threadId ? null : "sept-common",
+    agentResponse: "force_skip", files: [file],
+  });
+  expect(toolCalls).toHaveLength(1);
+  expect(toolCalls[0]!.name).toBe("ask_promptql");
+  expect(toolCalls[0]!.args).toEqual({
+    query: "[Client] Priya Sharma, +447700900123\n(document: invoice_0912.pdf)",
+    ...(threadId ? { thread_id: threadId } : { room_name: "sept-common" }),
+    agent_response: "force_skip",
+    files: [{ file_name: "invoice_0912.pdf", mime_type: "application/pdf", content_base64: "AAH+/w==" }],
+  });
+});
+
+test("downloaded media uses fallback metadata and preserves binary bytes", () => {
+  expect(promptQlFileFromMedia({
+    bytes: Buffer.from("abc"), sizeBytes: 3, mime: undefined,
+  }, "whatsapp-document-1")).toEqual({
+    file_name: "whatsapp-document-1", mime_type: "application/octet-stream", content_base64: "YWJj",
+  });
+  expect(() => promptQlFileFromMedia({ bytes: "not bytes" } as never, "a")).toThrow();
+});
+
+test.each([
+  { file_name: "../invoice.pdf" },
+  { file_name: "invoice\n.pdf" },
+  { mime_type: "not-a-mime" },
+  { mime_type: "image/jpeg\r\nx-header: value" },
+  { content_base64: "abc" },
+  { content_base64: "YWJj=AAA" },
+])("invalid attachment metadata never crosses the adapter boundary: %j", async (override) => {
+  const { toolCalls } = scriptByTool({ toolResults: [] });
+  const a = new PromptQlAdapter(deps);
+  await expect(a.ask("client", {
+    query: "hello", agentResponse: "force_skip",
+    files: [{ file_name: "file.pdf", mime_type: "application/pdf", content_base64: "YWJj", ...override }],
+  })).rejects.toThrow();
+  expect(toolCalls).toHaveLength(0);
+});
+
+test("upload failure preserves the bot handle, does not poll/retry or expose server details", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: {
+      status: "upload_failed", thread_id: "created-bot",
+      error_message: "private filename and token",
+    } } }],
+  });
+  const a = new PromptQlAdapter(deps);
+  let error: unknown;
+  try {
+    await a.ask("client", {
+      query: "[Client] no phone\n(image)", agentResponse: "force_skip",
+      files: [{ file_name: "image.jpg", mime_type: "image/jpeg", content_base64: "YWJj" }],
+    });
+  } catch (err) { error = err; }
+  expect(error).toBeInstanceOf(AskSubmissionError);
+  const failure = error as AskSubmissionError;
+  expect(failure.status).toBe("upload_failed");
+  expect(failure.ask).toEqual({ threadId: "created-bot", threadEventId: null });
+  expect(failure.message).not.toContain("private");
+  expect(toolCalls).toHaveLength(1);
+});
+
+
+test.each([
+  ["imageMessage", "image/jpeg", "image.jpg"],
+  ["videoMessage", "video/mp4", "video.mp4"],
+  ["documentMessage", "application/pdf", "document.pdf"],
+  ["audioMessage", "audio/ogg; codecs=opus", "voice.ogg"],
+  ["stickerMessage", "image/webp", "sticker.webp"],
+])("downloaded %s reaches a relay-only MCP post", async (field, mime, fallbackName) => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: { status: "success", thread_id: "bot" } } }],
+  });
+  const downloader = new TransientMediaDownloader(
+    1024, createLogger({ level: "error", sink: () => undefined }),
+    async () => (async function* () { yield Buffer.from([0, 255, 10]); })(),
+  );
+  const result = await downloader.download({
+    key: { id: "message", remoteJid: "group@g.us" },
+    message: { [field]: { mimetype: mime, fileLength: 3, ptt: true } },
+  } as WAMessage, {} as never);
+  expect(result.status).toBe("ready");
+  const a = new PromptQlAdapter(deps);
+  await a.ask("client", {
+    query: "[Client] no phone\ncaption", agentResponse: "force_skip",
+    files: [promptQlFileFromMedia(result.media!, fallbackName)],
+  });
+  expect(toolCalls).toHaveLength(1);
+  const file = toolCalls[0]!.args.files[0];
+  expect(file.file_name).toBe(fallbackName);
+  expect(file.mime_type).toBe(mime);
+  expect(Buffer.from(file.content_base64, "base64")).toEqual(Buffer.from([0, 255, 10]));
+});
+
+test("expired media can still be relayed as envelope text without a file", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: { thread_id: "bot" } } }],
+  });
+  const a = new PromptQlAdapter(deps);
+  await a.ask("client", {
+    query: "[Client] no phone\n(image)", agentResponse: "force_skip", files: [],
+  });
+  expect(toolCalls).toHaveLength(1);
+  expect(toolCalls[0]!.args.files).toBeUndefined();
+  expect(toolCalls[0]!.args.query).toBe("[Client] no phone\n(image)");
 });

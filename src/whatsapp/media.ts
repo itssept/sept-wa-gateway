@@ -5,6 +5,7 @@
 
 import { downloadMediaMessage, type WAMessage, type WASocket } from "baileys";
 import type { Logger } from "../logger.ts";
+import { z } from "zod";
 
 export type MediaStatus =
   | "none"
@@ -17,6 +18,8 @@ export interface DownloadedMedia {
   bytes: Buffer;
   mime: string | undefined;
   sizeBytes: number;
+  /** Safe original document name, when WhatsApp supplies one. */
+  fileName?: string;
 }
 
 const MEDIA_TYPES = [
@@ -57,6 +60,21 @@ function mediaMime(message: WAMessage): string | undefined {
     if (node?.mimetype) return node.mimetype;
   }
   return undefined;
+}
+
+const DocumentMetadataSchema = z.object({
+  fileName: z.string().nullish(),
+});
+
+/** Validate external metadata and discard path/control characters before this
+ * name becomes an attachment identifier. Invalid metadata uses the fallback.
+ */
+function documentFileName(message: WAMessage): string | undefined {
+  const parsed = DocumentMetadataSchema.safeParse(message.message?.documentMessage);
+  if (!parsed.success || !parsed.data.fileName) return undefined;
+  const name = parsed.data.fileName.split(/[\/\\]/).pop()!
+    .replace(/[\x00-\x1f\x7f\u2028\u2029]/g, "_").trim().slice(0, 255);
+  return name && name !== "." && name !== ".." ? name : undefined;
 }
 
 function mediaFileLength(message: WAMessage): number | null {
@@ -173,6 +191,7 @@ export class TransientMediaDownloader {
           bytes,
           mime: mediaMime(message),
           sizeBytes: bytes.length,
+          fileName: documentFileName(message),
         },
       };
     } catch (error) {

@@ -19,6 +19,7 @@
 
 import { z } from "zod";
 import type { Config } from "../config.ts";
+import type { DownloadedMedia } from "../whatsapp/media.ts";
 import { rootLogger, type Logger } from "../logger.ts";
 import { McpSession, McpError } from "./mcpClient.ts";
 
@@ -33,15 +34,52 @@ export interface AskResult {
 
 const PromptQlFileInputSchema = z
   .object({
-    file_name: z.string().min(1).max(255),
-    mime_type: z.string().min(1).max(255),
-    content_base64: z.string().min(1).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    file_name: z.string().trim().min(1).max(255)
+      .regex(/^[^\/\\\x00-\x1f\x7f\u2028\u2029]+$/)
+      .refine((name) => name !== "." && name !== ".."),
+    mime_type: z.string().min(1).max(255)
+      .regex(/^[\w!#$&^.+-]+\/[\w!#$&^.+-]+(?:;[^\r\n\x00-\x1f\x7f]*)?$/),
+    content_base64: z.string().min(1).regex(/^[A-Za-z0-9+/]+={0,2}$/)
+      .refine((content) => content.length % 4 === 0, "Invalid base64 length"),
   })
   .strict();
 
 const PromptQlFilesSchema = z.array(PromptQlFileInputSchema).max(1);
 
 export type PromptQlFileInput = z.infer<typeof PromptQlFileInputSchema>;
+
+/** Convert already-downloaded bytes for either a live or replayed post.
+ * The caller supplies a safe fallback name and releases the media after ask.
+ */
+export function promptQlFileFromMedia(
+  media: DownloadedMedia,
+  fallbackFileName: string,
+): PromptQlFileInput {
+  const bytes = z.instanceof(Buffer).parse(media.bytes);
+  return PromptQlFileInputSchema.parse({
+    file_name: media.fileName ?? fallbackFileName,
+    mime_type: media.mime ?? "application/octet-stream",
+    content_base64: bytes.toString("base64"),
+  });
+}
+
+const AskStatusSchema = z.enum([
+  "success", "upload_failed", "system_trigger_failed",
+  "change_model_failed", "sent_message_failed",
+]);
+
+/** A partial MCP failure can still have created a bot. Preserve its handle so
+ * callers can continue it, rather than blindly retrying creation.
+ */
+export class AskSubmissionError extends McpError {
+  constructor(
+    readonly status: Exclude<z.infer<typeof AskStatusSchema>, "success">,
+    readonly ask: AskResult,
+  ) {
+    super(`${TOOL_ASK} failed: ${status}`, "tool");
+    this.name = "AskSubmissionError";
+  }
+}
 
 const AskArgsSchema = z.object({
   query: z.string().min(1),
@@ -53,6 +91,7 @@ const AskArgsSchema = z.object({
   files: PromptQlFilesSchema.optional(),
 }).strict();
 const AskResponseSchema = z.object({
+  status: AskStatusSchema.optional(),
   thread_id: z.string().min(1),
   thread_event_id: z.string().min(1).nullish(),
 });
@@ -148,7 +187,13 @@ export class PromptQlAdapter {
       throw new McpError(`${TOOL_ASK} returned an invalid bot handle`, "protocol");
     }
     const sc = parsed.data;
-    return { threadId: sc.thread_id, threadEventId: sc.thread_event_id ?? null };
+    const ask = { threadId: sc.thread_id, threadEventId: sc.thread_event_id ?? null };
+    if (sc.status && sc.status !== "success") {
+      // Error details may contain file content or PII. Expose only the status
+      // and handle; do not log the server's untrusted error_message.
+      throw new AskSubmissionError(sc.status, ask);
+    }
+    return ask;
   }
 
   /**
