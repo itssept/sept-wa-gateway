@@ -231,4 +231,19 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE chat_bot ADD COLUMN relay_paused_at TEXT;
     `,
   },
+  {
+    version: 6,
+    name: "gateway_settings",
+    sql: /* sql */ `
+      -- One client identity and common public room for the whole gateway.
+      -- Existing shoppers keep their shopper token; re-registration supplies PA.
+      CREATE TABLE gateway_settings (
+        id                     INTEGER PRIMARY KEY CHECK (id = 1),
+        client_token_encrypted BLOB NOT NULL,
+        common_room_name       TEXT NOT NULL,
+        created_at             TEXT NOT NULL,
+        updated_at             TEXT NOT NULL
+      );
+    `,
+  },
 ];

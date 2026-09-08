@@ -10,30 +10,33 @@
  */
 
 import type { Database } from "bun:sqlite";
-import type { CredentialInfo, CredentialStatus } from "../domain/types.ts";
+import { z } from "zod";
+import { CredentialRoleSchema, type CredentialRole, type CredentialInfo } from "../domain/types.ts";
 import { encrypt, decryptToString, sha256Hex } from "../crypto.ts";
 import { nowIso, uuid } from "../util.ts";
 
-interface Row {
-  id: string;
-  shopper_id: string;
-  label: string;
-  service_account_id: string | null;
-  token_encrypted: Uint8Array;
-  token_fingerprint: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
+const CredentialRow = z.object({
+  id: z.string(),
+  shopper_id: z.string(),
+  label: CredentialRoleSchema,
+  service_account_id: z.string().nullable(),
+  token_encrypted: z.instanceof(Uint8Array),
+  token_fingerprint: z.string(),
+  status: z.enum(["active", "revoked"]),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+type Row = z.infer<typeof CredentialRow>;
 
-function toInfo(r: Row): CredentialInfo {
+function toInfo(row: Row): CredentialInfo {
+  const r = CredentialRow.parse(row);
   return {
     id: r.id,
     shopperId: r.shopper_id,
     label: r.label,
     serviceAccountId: r.service_account_id,
     tokenFingerprint: r.token_fingerprint,
-    status: r.status as CredentialStatus,
+    status: r.status,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -53,9 +56,9 @@ export class CredentialStore {
   setActive(
     shopperId: string,
     token: string,
-    opts: { label?: string; serviceAccountId?: string | null } = {},
+    opts: { label?: CredentialRole; serviceAccountId?: string | null } = {},
   ): CredentialInfo {
-    const label = opts.label ?? "shopper";
+    const label = CredentialRoleSchema.parse(opts.label ?? "shopper");
     const id = uuid();
     const ts = nowIso();
     const enc = encrypt(token, this.encKey);
@@ -80,7 +83,8 @@ export class CredentialStore {
   }
 
   /** Revoke the active credential for a shopper+label. Returns true if one was revoked. */
-  revokeActive(shopperId: string, label = "shopper"): boolean {
+  revokeActive(shopperId: string, label: CredentialRole = "shopper"): boolean {
+    CredentialRoleSchema.parse(label);
     const info = this.getActiveInfo(shopperId, label);
     if (!info) return false;
     this.db.run(
@@ -97,7 +101,8 @@ export class CredentialStore {
     return r ? toInfo(r) : null;
   }
 
-  getActiveInfo(shopperId: string, label = "shopper"): CredentialInfo | null {
+  getActiveInfo(shopperId: string, label: CredentialRole = "shopper"): CredentialInfo | null {
+    CredentialRoleSchema.parse(label);
     const r = this.db
       .query<Row, [string, string]>(
         `SELECT * FROM shopper_credential
@@ -121,7 +126,8 @@ export class CredentialStore {
    * MCP send boundary. The caller must never log or persist the return value.
    * Returns null when there is no active credential.
    */
-  getActiveToken(shopperId: string, label = "shopper"): string | null {
+  getActiveToken(shopperId: string, label: CredentialRole = "shopper"): string | null {
+    CredentialRoleSchema.parse(label);
     const r = this.db
       .query<Row, [string, string]>(
         `SELECT * FROM shopper_credential
@@ -129,6 +135,7 @@ export class CredentialStore {
       )
       .get(shopperId, label);
     if (!r) return null;
-    return decryptToString(Buffer.from(r.token_encrypted), this.encKey);
+    const row = CredentialRow.parse(r);
+    return decryptToString(Buffer.from(row.token_encrypted), this.encKey);
   }
 }

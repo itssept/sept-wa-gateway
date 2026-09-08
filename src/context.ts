@@ -8,6 +8,7 @@ import type { Config } from "./config.ts";
 import { openDatabase } from "./storage/db.ts";
 import { ShopperRepo } from "./storage/shopperRepo.ts";
 import { MappingRepo } from "./storage/mappingRepo.ts";
+import { GatewaySettingsRepo } from "./storage/gatewaySettingsRepo.ts";
 import { CredentialStore } from "./storage/credentialStore.ts";
 import { AuditLog } from "./storage/auditLog.ts";
 import { OutboundLog } from "./storage/outboundLog.ts";
@@ -25,6 +26,7 @@ export interface AppContext {
   shoppers: ShopperRepo;
   mappings: MappingRepo;
   credentials: CredentialStore;
+  gatewaySettings: GatewaySettingsRepo;
   audit: AuditLog;
   outboundLog: OutboundLog;
   workflows: McpWorkflowRepo;
@@ -40,6 +42,7 @@ export function createContext(config: Config, db?: Database, log?: Logger): AppC
   const shoppers = new ShopperRepo(database);
   const mappings = new MappingRepo(database);
   const credentials = new CredentialStore(database, config.dataEncryptionKey);
+  const gatewaySettings = new GatewaySettingsRepo(database, config.dataEncryptionKey);
   const audit = new AuditLog(database);
   const outboundLog = new OutboundLog(database);
   const workflows = new McpWorkflowRepo(database);
@@ -59,6 +62,7 @@ export function createContext(config: Config, db?: Database, log?: Logger): AppC
     shoppers,
     mappings,
     credentials,
+    gatewaySettings,
     audit,
     outboundLog,
     workflows,

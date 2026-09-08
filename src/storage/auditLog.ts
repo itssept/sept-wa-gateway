@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import { nowIso, uuid } from "../util.ts";
 
 export type AuditAction =
+  | "gateway.setup"
   | "shopper.create"
   | "shopper.disable"
   | "shopper.enable"

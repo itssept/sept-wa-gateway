@@ -3,6 +3,19 @@
  * kept deliberately free of PromptQL business logic.
  */
 
+import { z } from "zod";
+
+export const CredentialRoleSchema = z.enum(["shopper", "pa"], {
+  errorMap: () => ({ message: "role must be shopper or pa" }),
+});
+export type CredentialRole = z.infer<typeof CredentialRoleSchema>;
+
+/** Public setup status, with no client credential material. */
+export interface GatewaySetupStatus {
+  setupComplete: boolean;
+  commonRoomName: string | null;
+}
+
 export type ShopperStatus = "enabled" | "disabled";
 export type CredentialStatus = "active" | "revoked";
 export type MappingStatus = "enabled" | "disabled";
@@ -22,7 +35,7 @@ export interface Shopper {
 export interface CredentialInfo {
   id: string;
   shopperId: string;
-  label: string;
+  label: CredentialRole;
   serviceAccountId: string | null;
   tokenFingerprint: string;
   status: CredentialStatus;

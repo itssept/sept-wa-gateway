@@ -1,8 +1,8 @@
 # Admin API
 
 The management API. A PromptQL project (or any admin caller) uses it to drive
-the gateway: link a WhatsApp number and register shoppers. Callers work in
-shoppers and phone numbers; WhatsApp jids/lids and chat routing are internal.
+the gateway: configure the Client service account and common room, link a
+WhatsApp number, and register shoppers. Callers work in shoppers and phone numbers; WhatsApp jids/lids and chat routing are internal.
 
 Base path: `/api/v1`. See the [README](../README.md) for the wider system
 overview.
@@ -17,7 +17,7 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 ```
 
 - `GET /health` is the only unauthenticated route.
-- The tunnel / ingress URL is **not** a security boundary — the admin token
+- The tunnel / ingress URL is **not** a security boundary. The admin token
   gates every call.
 - The admin credential is separate from PromptQL MCP credentials and from the
   per-shopper tokens.
@@ -30,8 +30,8 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 - Max request body size is 1 MiB (`413` if exceeded).
 - Secrets (MCP tokens, session state) are **never** returned after creation and
   never logged. The API returns only a `tokenFingerprint` (sha256).
-- Shopper create / credential rotate / revoke / status changes are recorded in
-  `audit_log`.
+- Gateway setup, shopper registration, credential rotation/revocation, and
+  shopper status changes are recorded in `audit_log`.
 
 ### Error shape
 
@@ -44,8 +44,9 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 | 400 | Invalid JSON body. |
 | 401 | Missing or wrong admin token. |
 | 404 | Unknown route or resource. |
+| 409 | Gateway setup is required before shopper registration. |
 | 413 | Request body too large. |
-| 422 | Validation failed (`issues` array) or invalid E.164 phone / unknown `shopperId`. |
+| 422 | Validation failed (`issues` array) or invalid E.164 phone. |
 | 500 | Internal error. |
 | 503 | WhatsApp connection not initialized (connection routes only). |
 
@@ -57,13 +58,50 @@ Authorization: Bearer <GATEWAY_ADMIN_TOKEN>
 | GET | `/api/v1/connection` | Connection status + current pairing code. |
 | POST | `/api/v1/connection/link` | Start pairing for a number (wipes session, returns 202). |
 | POST | `/api/v1/connection/unlink` | Stop + wipe session so a new number can link. |
-| POST | `/api/v1/shoppers` | Register a shopper + set its MCP credential. Idempotent on phone. |
+| POST | `/api/v1/setup` | Set the gateway Client SA token and common public room. |
+| POST | `/api/v1/shoppers` | Register a shopper + set shopper and PA MCP credentials. Idempotent on phone. |
 | GET | `/api/v1/shoppers` | List shoppers (non-secret). |
 | GET | `/api/v1/shoppers/:id` | Read one shopper + its credential info. |
 | POST | `/api/v1/shoppers/:id/status` | Enable / disable. |
-| POST | `/api/v1/shoppers/:id/credential/rotate` | Rotate the MCP token. |
-| POST | `/api/v1/shoppers/:id/credential/revoke` | Revoke the MCP token. |
-| GET | `/api/v1/status` | Connection + counts (debug). |
+| POST | `/api/v1/shoppers/:id/credential/rotate` | Rotate the selected role's MCP token. |
+| POST | `/api/v1/shoppers/:id/credential/revoke` | Revoke the selected role's MCP token. |
+| GET | `/api/v1/status` | Setup state, common room, connection + counts. |
+
+## Gateway setup
+
+### POST /api/v1/setup
+
+Set both gateway-wide inputs before registering the first shopper. Returns
+`200`. Calling it again replaces both values atomically, including the Client
+SA token. This endpoint does not accept other gateway configuration.
+
+Create the Client service account with an MCP-scoped token and create the
+common **public** room in PromptQL first. The gateway stores these inputs; it
+does not create service accounts, mint tokens, create rooms, or verify their
+permissions. The room must be accessible to the service accounts that use it.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `clientMcpToken` | string (8–4096) | yes | Gateway-wide Client SA token. Encrypted under `DATA_ENCRYPTION_KEY`, never returned. |
+| `commonRoomName` | string (1–80) | yes | Existing public PromptQL room for unqualified chats. Stored verbatim. |
+
+Blank or missing values return `422`. A failed update leaves both old values
+unchanged. The settings survive restarts in the gateway SQLite database.
+
+```bash
+curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -X POST $BASE/api/v1/setup \
+  -d '{"clientMcpToken":"<client-mcp-scoped-token>","commonRoomName":"sept-common"}'
+```
+
+Response:
+
+```json
+{ "setupComplete": true, "commonRoomName": "sept-common" }
+```
+
+This stores credentials only. Routing under Client and PA identities is a
+separate change; setup alone does not change message routing.
 
 ## Connection
 
@@ -120,28 +158,58 @@ Stop and wipe the session so a new number can link. Returns the connection view.
 
 ### POST /api/v1/shoppers
 
-Register a shopper and set (or rotate) its MCP credential. **Idempotent on
-phone** — an existing shopper returns `200`, a new one returns `201`. On a
-re-register the mutable fields (`name`, `roomName`) are updated to the new
-values; a disabled shopper is never implicitly re-enabled. Response includes the
-shopper and the credential's non-secret info (`tokenFingerprint`, never the raw
-token).
+Register a shopper and set (or rotate) **both** its MCP credentials, labeled
+`shopper` and `pa`. Gateway setup must be complete or this returns `409` with:
+
+```json
+{ "error": "gateway setup required: POST /api/v1/setup with clientMcpToken and commonRoomName" }
+```
+
+Registration is **idempotent on phone**: an existing shopper returns `200`, a
+new one returns `201`. Re-registration updates `name`, `roomName`, and both
+tokens in one transaction. A disabled shopper is never implicitly re-enabled.
+
+Create both service accounts with MCP-scoped tokens and the shopper's
+**public** room in PromptQL first. The Shopper SA represents the shopper's
+own messages. The PA (personal assistant) SA answers clients on their behalf.
+The gateway does not mint either token or grant room access.
 
 Body:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `name` | string (1–200) | yes | Shopper display name. |
+| `name` | string (1–200) | yes | Nonblank shopper display name. |
 | `phone` | string | yes | Canonicalized to E.164 server-side. `422` if invalid. |
-| `roomName` | string (1–80) | yes | Caller-owned PromptQL `room_name` for this shopper. Stored verbatim and passed to PromptQL when starting the shopper's thread. The gateway does not derive it — PromptQL validates the value. |
-| `mcpToken` | string (8–4096) | yes | MCP-scoped service-account token. Stored encrypted, never returned. |
-| `serviceAccountId` | string (≤256) | no | Non-secret PromptQL service-account id for audit/attribution. |
+| `roomName` | string (1–80) | yes | Existing public PromptQL room for this shopper. Stored verbatim; PromptQL validates access. |
+| `mcpToken` | string (8–4096) | yes | Shopper SA MCP-scoped token. Stored encrypted, never returned. |
+| `paMcpToken` | string (8–4096) | yes | PA SA MCP-scoped token. Stored encrypted, never returned. |
+| `serviceAccountId` | string (≤256) | no | Non-secret Shopper SA id for audit/attribution. |
+| `paServiceAccountId` | string (≤256) | no | Non-secret PA SA id for audit/attribution. |
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -X POST $BASE/api/v1/shoppers \
-  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<mcp-scoped-token>"}'
+  -d '{"name":"Rakesh","phone":"+14155551212","roomName":"rakesh-room","mcpToken":"<shopper-mcp-token>","paMcpToken":"<pa-mcp-token>"}'
 ```
+
+Response includes `{ "shopper": ..., "credential": ..., "paCredential": ... }`.
+`credential.label` is `shopper`; `paCredential.label` is `pa`. Both credential
+objects contain non-secret metadata and `tokenFingerprint`, never a token.
+
+#### Upgrading existing registrations
+
+Migration 6 creates the gateway settings table without changing existing
+shoppers or credentials. It does not invent or copy a PA token. Therefore:
+
+1. Call `/api/v1/setup` with the Client SA token and common room.
+2. Re-register each existing shopper with the same phone, all required metadata,
+   and both `mcpToken` and `paMcpToken`. This keeps the shopper id and status.
+3. Update callers of rotate/revoke to send `role`.
+
+Until re-registration, existing shoppers have no PA token:
+`getActiveToken(shopperId, "pa")` returns `null`. The migration does not disable
+them or alter current routing. Re-register them before enabling the routing
+changes that depend on PA credentials.
 
 ### GET /api/v1/shoppers
 
@@ -160,44 +228,77 @@ Body: `{ "status": "enabled" | "disabled" }`
 
 ### POST /api/v1/shoppers/:id/credential/rotate
 
-Rotate the MCP token. Drops any cached MCP session using the old token. `404` if
-the shopper is not found.
+Rotate the MCP token for `role: "shopper"` or `role: "pa"`. Only the selected
+role's active credential is revoked and replaced. The other role is unchanged.
+Invalidates the shopper's cached MCP session. `404` if the shopper is not found.
 
 Body:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
+| `role` | `shopper` or `pa` | yes | Identity to rotate. Missing or invalid role returns `422`. |
 | `mcpToken` | string (8–4096) | yes | New MCP-scoped token. |
 | `serviceAccountId` | string (≤256) | no | Non-secret service-account id. |
 
+Example PA token rotation body:
+
+```json
+{ "role": "pa", "mcpToken": "<new-pa-mcp-token>" }
+```
+
 ### POST /api/v1/shoppers/:id/credential/revoke
 
-Revoke the active MCP token and drop any cached MCP session. `404` if the
-shopper is not found. Returns `{ "revoked": <bool> }`.
+Revoke only the selected role's active MCP token and invalidate the shopper's
+cached MCP session. The other role is unchanged. `404` if the shopper is not
+found. Missing or invalid role returns `422`.
+
+Body: `{ "role": "shopper" | "pa" }`
+
+Returns `{ "revoked": <bool> }`. It returns `false` when that role already has
+no active credential. Rotation can later supply a new active token for it.
 
 ## Routing (no API)
 
 There is **no mappings API**. How an inbound WhatsApp chat resolves to a shopper
-is an internal concern of the gateway, expressed in shoppers and phone numbers —
+is an internal concern of the gateway, expressed in shoppers and phone numbers,
 never in WhatsApp jids/lids, which API users do not see.
 
-Resolution (internal, see `src/routing/resolver.ts`): a message auto-resolves by
-the **sender's phone** (the participant in a group, the chat in a DM) to a
-registered, enabled shopper. Senders that are not registered shoppers are
-dropped. An internal chat→shopper mapping table exists for pinning specific
-chats, but it is not manageable over the API.
+Routing is implemented separately in `src/routing/`. These management
+endpoints store the credentials and room names needed by routing; they do not
+expose chat mappings or change group membership.
+
+### Storage access for routing
+
+- `ctx.credentials.getActiveToken(shopperId, "shopper" | "pa")` returns the
+  active token for that role, or `null`. Omitting the role retains the existing
+  `shopper` default.
+- `ctx.gatewaySettings.getClientToken()` returns the Client SA token, or `null`
+  before setup.
+- `ctx.gatewaySettings.getCommonRoomName()` returns the common room, or `null`
+  before setup.
+
+Decrypted tokens are for immediate MCP use only. Never log, return over the
+admin API, or persist the plaintext. Role-aware routing must keep MCP sessions
+separate by identity and invalidate the affected session when tokens change.
 
 ## Status (debug)
 
 ### GET /api/v1/status
 
-Connection view plus counts:
+Connection view plus counts and non-secret setup status:
 
 ```json
 {
   "connection": { "...": "connection view or null" },
   "shoppers": 3,
   "mappings": 5,
-  "mcpConfigured": true
+  "mcpConfigured": true,
+  "setupComplete": true,
+  "commonRoomName": "sept-common"
 }
 ```
+
+Before setup, `setupComplete` is `false` and `commonRoomName` is `null`.
+`setupComplete` means both values have been stored, not that the token or room
+permissions have been verified against PromptQL. The Client SA token is never
+included.

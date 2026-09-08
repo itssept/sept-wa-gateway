@@ -2,7 +2,8 @@
  * Management API (spec direction: resource-oriented, versioned). Routes:
  *
  *   GET    /health                                  (unauthenticated)
- *   POST   /api/v1/shoppers                         create/register shopper (+ credential)
+ *   POST   /api/v1/setup                            set Client SA token + common room
+ *   POST   /api/v1/shoppers                         register shopper + shopper/PA credentials
  *   GET    /api/v1/shoppers                         list shoppers (non-secret)
  *   GET    /api/v1/shoppers/:id                     read one (non-secret)
  *   POST   /api/v1/shoppers/:id/status              enable/disable
@@ -25,10 +26,13 @@ import type { WhatsAppConnection } from "../whatsapp/socket.ts";
 import { isAuthorized } from "../security/adminAuth.ts";
 import {
   CreateShopper,
+  SetupGateway,
   RotateCredential,
+  RevokeCredential,
   SetShopperStatus,
   LinkConnection,
 } from "./schemas.ts";
+import { sha256Hex } from "../crypto.ts";
 import { canonicalizeE164 } from "../util.ts";
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024;
@@ -121,6 +125,19 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
     }
 
     try {
+      if (resource === "setup" && segments.length === 3 && req.method === "POST") {
+        const parsed = await readJson(req, SetupGateway);
+        if (!parsed.ok) return parsed.response;
+        const setup = ctx.db.transaction(() => {
+          const status = ctx.gatewaySettings.set(parsed.data.clientMcpToken, parsed.data.commonRoomName);
+          ctx.audit.record("gateway.setup", {
+            subjectType: "gateway",
+            detail: { clientTokenFingerprint: sha256Hex(parsed.data.clientMcpToken) },
+          });
+          return status;
+        })();
+        return json(setup);
+      }
       if (resource === "shoppers") {
         return await handleShoppers(req, segments.slice(3), ctx);
       }
@@ -133,6 +150,7 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
           shoppers: ctx.shoppers.list().length,
           mappings: ctx.mappings.list().length,
           mcpConfigured: Boolean(ctx.config.mcp.endpoint),
+          ...ctx.gatewaySettings.getStatus(),
         });
       }
       return err(404, "not found");
@@ -218,24 +236,40 @@ async function handleShoppers(
 ): Promise<Response> {
   // POST /api/v1/shoppers
   if (rest.length === 0 && req.method === "POST") {
+    if (!ctx.gatewaySettings.getStatus().setupComplete) {
+      return err(409, "gateway setup required: POST /api/v1/setup with clientMcpToken and commonRoomName");
+    }
     const parsed = await readJson(req, CreateShopper);
     if (!parsed.ok) return parsed.response;
-    const { name, phone, roomName, mcpToken, serviceAccountId } = parsed.data;
+    const { name, phone, roomName, mcpToken, serviceAccountId, paMcpToken, paServiceAccountId } = parsed.data;
     const canonical = canonicalizeE164(phone);
     if (!canonical) return err(422, "phone is not a valid E.164 number");
 
-    const { shopper, created } = ctx.shoppers.register(name, canonical, roomName);
-    // Set (or rotate) the shopper's MCP credential.
-    const cred = ctx.credentials.setActive(shopper.id, mcpToken, {
-      serviceAccountId: serviceAccountId ?? null,
-    });
-    ctx.audit.record("shopper.create", {
-      subjectType: "shopper",
-      subjectId: shopper.id,
-      detail: { created, credentialFingerprint: cred.tokenFingerprint },
-    });
+    // Keep registration and both identities atomic, including re-registration.
+    const { shopper, created, cred, paCred } = ctx.db.transaction(() => {
+      const { shopper, created } = ctx.shoppers.register(name, canonical, roomName);
+      const cred = ctx.credentials.setActive(shopper.id, mcpToken, {
+        label: "shopper",
+        serviceAccountId: serviceAccountId ?? null,
+      });
+      const paCred = ctx.credentials.setActive(shopper.id, paMcpToken, {
+        label: "pa",
+        serviceAccountId: paServiceAccountId ?? null,
+      });
+      ctx.audit.record("shopper.create", {
+        subjectType: "shopper",
+        subjectId: shopper.id,
+        detail: {
+          created,
+          credentialFingerprint: cred.tokenFingerprint,
+          paCredentialFingerprint: paCred.tokenFingerprint,
+        },
+      });
+      return { shopper, created, cred, paCred };
+    })();
+    ctx.adapter.invalidate(shopper.id);
     return json(
-      { shopper, credential: cred },
+      { shopper, credential: cred, paCredential: paCred },
       created ? 201 : 200,
     );
   }
@@ -279,13 +313,14 @@ async function handleShoppers(
     const parsed = await readJson(req, RotateCredential);
     if (!parsed.ok) return parsed.response;
     const cred = ctx.credentials.setActive(id, parsed.data.mcpToken, {
+      label: parsed.data.role,
       serviceAccountId: parsed.data.serviceAccountId ?? null,
     });
     ctx.adapter.invalidate(id); // drop any cached MCP session using the old token
     ctx.audit.record("credential.rotate", {
       subjectType: "credential",
       subjectId: cred.id,
-      detail: { shopperId: id, fingerprint: cred.tokenFingerprint },
+      detail: { shopperId: id, role: parsed.data.role, fingerprint: cred.tokenFingerprint },
     });
     return json({ credential: cred });
   }
@@ -298,9 +333,15 @@ async function handleShoppers(
     req.method === "POST"
   ) {
     if (!ctx.shoppers.getById(id)) return err(404, "shopper not found");
-    const revoked = ctx.credentials.revokeActive(id);
+    const parsed = await readJson(req, RevokeCredential);
+    if (!parsed.ok) return parsed.response;
+    const revoked = ctx.credentials.revokeActive(id, parsed.data.role);
     ctx.adapter.invalidate(id);
-    ctx.audit.record("credential.revoke", { subjectType: "shopper", subjectId: id });
+    ctx.audit.record("credential.revoke", {
+      subjectType: "shopper",
+      subjectId: id,
+      detail: { role: parsed.data.role },
+    });
     return json({ revoked });
   }
 
