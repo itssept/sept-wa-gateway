@@ -2,6 +2,9 @@ import { z } from "zod";
 
 const ClientEnvelopeSchema = z.object({
   displayName: z.string().nullish(),
+  phoneE164: z.string().regex(/^\+[1-9]\d{5,14}$/).nullish(),
+  /** Opaque WhatsApp identity. Never interpret LID digits as a phone number. */
+  lid: z.string().nullish(),
   /** The message body, or the caption for media. */
   text: z.string(),
   media: z.object({
@@ -22,8 +25,8 @@ export function formatClientEnvelope(input: ClientEnvelopeInput): string {
   const singleLine = (text: string | null | undefined) =>
     text?.replace(/[\r\n\u2028\u2029]/g, " ").trim();
   const name = singleLine(value.displayName);
-  // The client's identity (phone/LID) is deliberately omitted from the envelope.
-  const header = `[Client]${name ? ` ${name}` : ""}`;
+  const identity = value.phoneE164 ?? (singleLine(value.lid) || "no phone");
+  const header = `[Client] ${name ? `${name}, ` : ""}${identity}`;
   let text = value.text;
   if (!text.trim() && value.media) {
     const fileName = singleLine(value.media.fileName);

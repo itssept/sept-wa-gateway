@@ -51,9 +51,8 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   MCP sessions are isolated by shopper and role, plus a separate Client session.
   Registration, setup, rotation and revocation invalidate the affected sessions.
 - Shopper text is sent unchanged, without a prefix. Client posts use
-  `[Client] <push name>` on one line, then the text or caption. The sender's
-  phone/LID identity is not included; a missing name leaves the bare `[Client]`
-  tag.
+  `[Client] <push name>, <E.164>` on one line, then the text or caption. Missing
+  names are omitted; missing phones use the opaque LID or `no phone`.
 - Image, video, audio, document and sticker files are downloaded transiently
   in DMs and groups, attached through `ask_promptql.files`, then released.
   Original document names and voice-note labels are preserved. Contact cards

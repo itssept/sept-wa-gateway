@@ -4,8 +4,8 @@ import {
   type ClientEnvelopeInput,
 } from "../src/promptql/clientEnvelope.ts";
 
-const client = { displayName: "Priya Sharma" };
-const header = "[Client] Priya Sharma";
+const client = { displayName: "Priya Sharma", phoneE164: "+447700900123" };
+const header = "[Client] Priya Sharma, +447700900123";
 
 test("plain text matches the plan exactly", () => {
   const text = "Can you find the Bottega Jodie in size medium, black?";
@@ -27,16 +27,25 @@ test("document without caption uses its filename", () => {
   })).toBe(`${header}\n(document: invoice_0912.pdf)`);
 });
 
-test.each([undefined, null, "", " \t "])("missing display name (%s) leaves the bare tag", (displayName) => {
+test.each([undefined, null, "", " \t "])("missing display name (%s) leaves only the phone", (displayName) => {
   expect(formatClientEnvelope({ ...client, displayName, text: "Hi" }))
-    .toBe("[Client]\nHi");
+    .toBe("[Client] +447700900123\nHi");
 });
 
-test("the client's phone/LID identity is never included", () => {
-  // Identity fields are dropped from the schema; only [Client] + name remain.
+test("a LID replaces a missing phone without inventing a phone", () => {
+  expect(formatClientEnvelope({
+    displayName: "Priya Sharma", lid: "123456789@lid", text: "Hi",
+  })).toBe("[Client] Priya Sharma, 123456789@lid\nHi");
+  expect(formatClientEnvelope({ lid: "123456789@lid", text: "Hi" }))
+    .toBe("[Client] 123456789@lid\nHi");
+});
+
+test("phone takes precedence over LID; neither uses no phone", () => {
+  expect(formatClientEnvelope({ ...client, lid: "123456789@lid", text: "Hi" }))
+    .toBe(`${header}\nHi`);
   expect(formatClientEnvelope({ displayName: "Priya Sharma", text: "Hi" }))
-    .toBe("[Client] Priya Sharma\nHi");
-  expect(formatClientEnvelope({ text: "Hi" })).toBe("[Client]\nHi");
+    .toBe("[Client] Priya Sharma, no phone\nHi");
+  expect(formatClientEnvelope({ text: "Hi" })).toBe("[Client] no phone\nHi");
 });
 
 const kinds: Array<NonNullable<ClientEnvelopeInput["media"]>["kind"]> = [
@@ -67,12 +76,13 @@ test("live and replayed posts add neither timestamps nor reply quotes", () => {
 
 test("untrusted metadata cannot split the header or media label across lines", () => {
   expect(formatClientEnvelope({
-    displayName: "Priya\nSharma",
-    text: "", media: { kind: "document", fileName: "invoice one.pdf" },
-  })).toBe("[Client] Priya Sharma\n(document: invoice one.pdf)");
+    displayName: "Priya\nSharma", lid: "123@lid\r\n",
+    text: "", media: { kind: "document", fileName: "invoice\u2028one.pdf" },
+  })).toBe("[Client] Priya Sharma, 123@lid\n(document: invoice one.pdf)");
 });
 
-test("invalid metadata types fail validation", () => {
+test("invalid metadata types and a non-E.164 phone fail validation", () => {
+  expect(() => formatClientEnvelope({ text: "Hi", phoneE164: "123456789@lid" })).toThrow();
   expect(() => formatClientEnvelope({ text: 42 } as never)).toThrow();
   expect(() => formatClientEnvelope({ text: "", media: { kind: "bad" } } as never)).toThrow();
 });
