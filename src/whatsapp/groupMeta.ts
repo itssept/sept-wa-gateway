@@ -7,6 +7,7 @@
  * (TTL = WHATSAPP_GROUP_META_TTL_MS).
  */
 
+import { z } from "zod";
 import type { Database } from "bun:sqlite";
 import type { GroupMetadata, WASocket } from "baileys";
 import { rootLogger, type Logger } from "../logger.ts";
@@ -46,6 +47,7 @@ function toParticipants(meta: GroupMetadata): GroupParticipant[] {
 
 export class GroupMetaStore {
   private readonly log: Logger;
+  private readonly removed = new Set<string>();
 
   constructor(
     private readonly db: Database,
@@ -55,8 +57,21 @@ export class GroupMetaStore {
     this.log = (log ?? rootLogger).child({ component: "groupMeta" });
   }
 
+  remove(connectionId: string, groupJid: string): void {
+    z.tuple([z.string().min(1), z.string().min(1)]).parse([connectionId, groupJid]);
+    this.removed.add(JSON.stringify([connectionId, groupJid]));
+    this.db.run("DELETE FROM whatsapp_group_metadata WHERE connection_id = ? AND group_jid = ?",
+      [connectionId, groupJid]);
+  }
+
+  allowFetch(connectionId: string, groupJid: string): void {
+    this.removed.delete(JSON.stringify([connectionId, groupJid]));
+  }
+
   /** Persist metadata from a Baileys GroupMetadata object. */
   upsert(connectionId: string, meta: GroupMetadata): void {
+    // A metadata fetch begun before removal may finish afterwards.
+    if (this.removed.has(JSON.stringify([connectionId, meta.id]))) return;
     const participants = toParticipants(meta);
     this.db.run(
       `INSERT INTO whatsapp_group_metadata
@@ -122,6 +137,7 @@ export class GroupMetaStore {
     groupJid: string,
     sock: Pick<WASocket, "groupMetadata">,
   ): Promise<StoredGroupMetadata | null> {
+    if (this.removed.has(JSON.stringify([connectionId, groupJid]))) return null;
     const cached = this.read(connectionId, groupJid);
     if (cached && !this.isStale(cached.updatedAt)) return cached;
     try {

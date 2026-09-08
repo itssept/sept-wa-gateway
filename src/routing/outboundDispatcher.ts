@@ -11,6 +11,8 @@
  *     the claim token (retry-safe, fenced against a lost claim).
  */
 
+import type { ChatBotRepo } from "../storage/chatBotRepo.ts";
+import { isGroupJid } from "../util.ts";
 import type { PromptQlAdapter } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
@@ -38,6 +40,7 @@ export class OutboundDispatcher {
     private readonly connection: WhatsAppConnection,
     private readonly config: Config,
     private readonly log: Logger,
+    private readonly chatBots: ChatBotRepo,
   ) {}
 
   async dispatch(input: DispatchInput): Promise<void> {
@@ -66,9 +69,19 @@ export class OutboundDispatcher {
       return;
     }
 
+    const canSend = () => !isGroupJid(input.chatJid) ||
+      this.chatBots.get(input.connectionId, input.chatJid)?.relayPausedAt == null;
+    if (!canSend()) {
+      this.fail(input, "chat_left");
+      return;
+    }
+
     this.workflows.markDone(input.workflowId, answer);
     try {
-      const ref = await this.connection.sendText(input.chatJid, answer);
+      const ref = await this.connection.sendText(input.chatJid, answer, {
+        beforeSend: canSend,
+        onMessageId: (id) => this.outboundLog.recordGatewayMessage(input.connectionId, input.chatJid, id),
+      });
       const ok = this.outboundLog.markSent(
         input.connectionId,
         input.idempotencyKey,
@@ -79,6 +92,10 @@ export class OutboundDispatcher {
       if (ok) log.info("outbound sent", { messageRef: ref });
       else log.warn("outbound claim lost");
     } catch (err) {
+      if (err instanceof Error && err.message === "chat_left") {
+        this.fail(input, "chat_left");
+        return;
+      }
       this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
       this.log.error("outbound send failed", {
         corrId: input.idempotencyKey,

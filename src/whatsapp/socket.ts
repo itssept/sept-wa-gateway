@@ -18,11 +18,16 @@
 
 import makeWASocket, {
   Browsers,
+  generateMessageIDV2,
+  normalizeMessageContent,
   DisconnectReason,
   fetchLatestWaWebVersion,
   type WAMessage,
   type WASocket,
 } from "baileys";
+import { z } from "zod";
+import { ownJids, mentionsSelf, selfParticipantUpdate, selfGroupUpserts, type SelfMembershipEvent } from "./groupEvents.ts";
+import { OutboundLog } from "../storage/outboundLog.ts";
 import { Boom } from "@hapi/boom";
 import type { Database } from "bun:sqlite";
 import type { Config } from "../config.ts";
@@ -66,9 +71,12 @@ export interface InboundMessage {
   media: DownloadedMedia | null;
   isGroup: boolean;
   fromMe: boolean;
+  mentionsSelf: boolean;
 }
 
 export interface SocketHooks {
+  onSelfRemoved?: (event: SelfMembershipEvent) => void;
+  onSelfAdded?: (event: SelfMembershipEvent) => void;
   /** Called for each captured inbound message (already persisted). */
   onInbound?: (msg: InboundMessage) => void | Promise<void>;
   /** Called when the connection transitions to logged_out (human must re-link). */
@@ -102,6 +110,8 @@ export class WhatsAppConnection {
   private readonly groups: GroupMetaStore;
   private readonly media: TransientMediaDownloader;
   private readonly log: Logger;
+  private readonly outboundLog: OutboundLog;
+  private readonly groupEpochs = new Map<string, number>();
   private inboundQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -116,6 +126,7 @@ export class WhatsAppConnection {
       component: "whatsapp",
       connectionId: config.connectionId,
     });
+    this.outboundLog = new OutboundLog(db);
     this.groups = new GroupMetaStore(db, config.groupMetaTtlMs, this.log);
     this.media = new TransientMediaDownloader(
       config.maxMediaBytes,
@@ -323,8 +334,9 @@ export class WhatsAppConnection {
     sock.ev.on("messages.upsert", (up) => {
       // Queue the whole download → PromptQL handoff. This bounds transient
       // attachment memory even when Baileys emits several upsert events.
+      const epochs = new Map(this.groupEpochs);
       this.inboundQueue = this.inboundQueue
-        .then(() => this.onMessagesUpsert(up, sock))
+        .then(() => this.onMessagesUpsert(up, sock, epochs))
         .catch((err) => {
           this.log.error("inbound batch handling failed", { err });
         });
@@ -346,11 +358,44 @@ export class WhatsAppConnection {
       }
     });
 
-    sock.ev.on("group-participants.update", async (update) => {
-      await this.groups
-        .readOrFetch(this.config.connectionId, update.id, sock)
+    sock.ev.on("group-participants.update", (update) => this.onParticipantUpdate(update, sock));
+    sock.ev.on("groups.upsert", (updates) => this.onGroupUpserts(updates, sock));
+  }
+
+  private onParticipantUpdate(update: unknown, sock: WASocket): void {
+    try {
+      const event = selfParticipantUpdate(update, sock.user);
+      if (event) this.onSelfMembership(event.groupJid, event.action);
+      // Do not re-fetch metadata after removal: the account cannot read it.
+      if (event?.action === "remove") return;
+      const { id } = z.object({ id: z.string().min(1) }).parse(update);
+      void this.groups.readOrFetch(this.config.connectionId, id, sock)
         .catch(() => undefined);
-    });
+    } catch {
+      this.log.warn("invalid group participant event");
+    }
+  }
+
+  private onGroupUpserts(updates: unknown, sock: WASocket): void {
+    try {
+      for (const groupJid of selfGroupUpserts(updates, sock.user)) {
+        this.onSelfMembership(groupJid, "add");
+      }
+    } catch {
+      this.log.warn("invalid group upsert event");
+    }
+  }
+
+  private onSelfMembership(groupJid: string, action: "add" | "remove"): void {
+    this.groupEpochs.set(groupJid, (this.groupEpochs.get(groupJid) ?? 0) + 1);
+    const event = { connectionId: this.config.connectionId, groupJid };
+    if (action === "remove") {
+      this.groups.remove(event.connectionId, groupJid);
+      this.hooks.onSelfRemoved?.(event);
+    } else {
+      this.groups.allowFetch(event.connectionId, groupJid);
+      this.hooks.onSelfAdded?.(event);
+    }
   }
 
   private onConnectionUpdate(u: {
@@ -428,26 +473,32 @@ export class WhatsAppConnection {
   private async onMessagesUpsert(
     up: { messages: WAMessage[]; type: string },
     sock: WASocket,
+    epochs = new Map(this.groupEpochs),
   ): Promise<void> {
     if (up.type !== "notify" && up.type !== "append") return;
     for (const message of up.messages) {
       try {
-        const parsed = this.parseMessage(message);
+        const parsed = this.parseMessage(message, sock.user);
         if (!parsed) continue;
 
-        // fromMe messages are captured for loop prevention but never need
-        // their media downloaded.
-        if (parsed.fromMe) {
-          this.messages.capture(parsed);
-          continue;
-        }
+        // Capture once even before activation. A duplicate of an old, capture-
+        // only message must not become a backfill after the first tag/rejoin.
+        const captured = this.messages.capture(parsed);
+        if (!captured && parsed.isGroup) continue;
+        if (parsed.fromMe && (!parsed.isGroup ||
+          this.outboundLog.isGatewayMessage(parsed.connectionId, parsed.chatJid, parsed.messageId))) continue;
+        const stale = () => parsed.isGroup &&
+          (epochs.get(parsed.chatJid) ?? 0) !== (this.groupEpochs.get(parsed.chatJid) ?? 0);
+        if (stale()) continue;
 
-        // Download into bounded memory before the WhatsApp CDN URL expires.
-        // The router releases these bytes after ask_promptql accepts or fails.
-        const { status, media } = await this.media.download(message, sock);
-        parsed.mediaStatus = status;
-        parsed.media = media;
-        this.messages.capture(parsed);
+        // Group media is marker + caption, with no attachment allocation.
+        // Preserve transient file delivery for DMs.
+        if (!parsed.isGroup) {
+          const { status, media } = await this.media.download(message, sock);
+          parsed.mediaStatus = status;
+          parsed.media = media;
+        }
+        if (stale()) continue;
         try {
           // Await the handoff so this upsert batch does not retain several
           // attachment buffers while PromptQL accepts/retries earlier ones.
@@ -463,7 +514,7 @@ export class WhatsAppConnection {
     }
   }
 
-  private parseMessage(m: WAMessage): InboundMessage | null {
+  private parseMessage(m: WAMessage, user: unknown = this.live.sock?.user): InboundMessage | null {
     const chatJid = m.key.remoteJid;
     if (!chatJid) return null;
     const messageId = m.key.id;
@@ -471,7 +522,9 @@ export class WhatsAppConnection {
     const fromMe = Boolean(m.key.fromMe);
     const isGroup = isGroupJid(chatJid);
     // In a group, participant is the real sender; in a DM it's the chat jid.
-    const senderJid = isGroup ? (m.key.participant ?? chatJid) : chatJid;
+    const senderJid = fromMe
+      ? ([...ownJids(user)].find((jid) => phoneE164FromJid(jid)) ?? m.key.participant ?? chatJid)
+      : isGroup ? (m.key.participant ?? chatJid) : chatJid;
 
     // LID addressing: when WhatsApp delivers over a LID (`<id>@lid`), the sender
     // jid carries NO phone number. Baileys surfaces the phone-number (`@s.what...`)
@@ -482,8 +535,9 @@ export class WhatsAppConnection {
     const phoneBearingJid = isGroup
       ? (m.key.participantAlt ?? senderJid)
       : (m.key.remoteJidAlt ?? senderJid);
-    const senderPhoneE164 =
-      phoneE164FromJid(phoneBearingJid) ?? phoneE164FromJid(senderJid);
+    const senderPhoneE164 = fromMe
+      ? phoneE164FromJid(senderJid)
+      : phoneE164FromJid(phoneBearingJid) ?? phoneE164FromJid(senderJid);
 
     // LID observability. Sender-based routing depends on recovering a phone from
     // the *Alt field of a LID-addressed message. Keep a durable signal for it:
@@ -521,6 +575,7 @@ export class WhatsAppConnection {
       media: null,
       isGroup,
       fromMe,
+      mentionsSelf: mentionsSelf(m, user),
     };
   }
 
@@ -530,7 +585,15 @@ export class WhatsAppConnection {
    * key id on success. Never call sock.sendMessage directly — always go through
    * this so pacing/presence/serialization apply.
    */
-  async sendText(chatJid: string, text: string): Promise<string> {
+  async sendText(
+    chatJid: string,
+    text: string,
+    options: {
+      beforeSend?: () => boolean;
+      onMessageId?: (id: string) => void;
+    } = {},
+  ): Promise<string> {
+    z.object({ chatJid: z.string().min(1), text: z.string().min(1) }).parse({ chatJid, text });
     const sock = this.live.sock;
     if (!sock || this.live.status !== "linked") {
       throw new Error(`connection ${this.config.connectionId} is not linked`);
@@ -548,21 +611,28 @@ export class WhatsAppConnection {
       },
     };
     return this.antiBan.enqueue(ctx, async () => {
-      const sent = await sock.sendMessage(chatJid, { text });
-      return sent?.key?.id ?? "";
+      // Re-check after anti-ban pacing, not only when dispatch began.
+      if (options.beforeSend && !options.beforeSend()) throw new Error("chat_left");
+      const messageId = generateMessageIDV2(sock.user?.id);
+      // Persist before sendMessage can emit our own echo.
+      options.onMessageId?.(messageId);
+      const sent = await sock.sendMessage(chatJid, { text }, { messageId });
+      const parsed = z.object({ key: z.object({ id: z.string().min(1) }) }).parse(sent);
+      return parsed.key.id;
     });
   }
 }
 
 /** Extract plain text from the common WAMessage shapes. */
 function extractText(m: WAMessage): string {
-  const msg = m.message;
+  const msg = normalizeMessageContent(m.message);
   if (!msg) return "";
   return (
     msg.conversation ??
     msg.extendedTextMessage?.text ??
     msg.imageMessage?.caption ??
     msg.videoMessage?.caption ??
+    msg.documentMessage?.caption ??
     ""
   );
 }

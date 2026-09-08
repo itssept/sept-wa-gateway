@@ -224,4 +224,11 @@ export const MIGRATIONS: Migration[] = [
       SELECT 1;
     `,
   },
+  {
+    version: 5,
+    name: "group_relay_pause",
+    sql: /* sql */ `
+      ALTER TABLE chat_bot ADD COLUMN relay_paused_at TEXT;
+    `,
+  },
 ];

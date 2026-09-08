@@ -35,7 +35,7 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 | Config | `src/config.ts` | Zod-validated env. MCP URL / path / auth scheme configurable. |
 | Crypto | `src/crypto.ts` | AES-256-GCM at rest, constant-time compare, one-way hash. |
 | Storage | `src/storage/` | SQLite migrations + repositories. |
-| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth, socket lifecycle, anti-ban queue, media download and object storage. |
+| WhatsApp | `src/whatsapp/` | Encrypted Baileys auth, socket lifecycle, anti-ban queue, transient DM media download. |
 | Security | `src/security/` | Admin auth (constant-time). |
 | PromptQL | `src/promptql/` | MCP client (JSON-RPC 2.0 / Streamable HTTP), adapter, discovery diagnostic. |
 | Routing | `src/routing/` | Resolver, inbound router, outbound dispatcher. |
@@ -48,13 +48,14 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   one MCP-scoped service-account token (encrypted at rest, never returned after
   creation).
 - **Routing keys on the sender.** The gateway auto-resolves by the message
-  sender's phone to a registered, enabled shopper. Unregistered senders are
-  dropped. There is no mappings API — callers work in shoppers and phone
-  numbers, not WhatsApp jids.
+  sender's phone to a registered, enabled shopper. DMs retain internal mapping
+  overrides; group tags always use the sender's own registration. Unregistered
+  senders never trigger the bot, but can contribute group context after the
+  first tag. There is no mappings API.
 - **Each shopper gets its own MCP session,** so PromptQL attributes the work to
   the right service account. Follow-up messages continue the same bot (per-chat
   continuity in `chat_bot`).
-- **Media is downloaded transiently and attached to PromptQL.** WhatsApp CDN
+- **DM media is downloaded transiently and attached to PromptQL.** WhatsApp CDN
   URLs expire, so supported image, video, audio, document, and sticker messages
   are downloaded into bounded memory and relayed through `ask_promptql.files`.
   The bytes are discarded after the MCP call accepts or exhausts its retries;
@@ -64,7 +65,51 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 - **Every `/api/v1/*` endpoint requires the admin token** (`GATEWAY_ADMIN_TOKEN`,
   constant-time compare). Secrets are encrypted at rest and never logged or
   returned after creation. Rejected senders are silently dropped with an audit
-  line — no unsolicited reply.
+  line, with no unsolicited reply. Group messages before activation are simply
+  captured; they do not create a PromptQL bot.
+
+### Group behavior
+
+| Group state | Ordinary message, including an unregistered member's tag | Registered shopper tags the linked number |
+|---|---|---|
+| Never tagged | Capture only | Create a bot and send only this message |
+| Active | Mirror with `force_skip`, no bot run | Continue with `force_respond` under the tagger's token |
+| Removed or re-added | Capture only when messages arrive | Continue the same bot and resume mirroring |
+
+The group's shoppers share one bot. Each responding tag uses its sender's
+credentials; other messages use the last tagger's token with a sender label.
+The linked phone's manual messages are mirrored too. Gateway replies are not,
+because they already exist in the bot's chat.
+
+Group media is sent as `[WhatsApp image]` (or the relevant type) plus its
+caption. Group text has `@digits` stripped and a name/phone prefix. The default
+for an unregistered member is full E.164, with an explicit opaque JID fallback
+when WhatsApp supplies no phone. This formatting lives in `senderLabel()`.
+
+Removing or re-adding the linked account pauses mirroring until the next tag.
+There are no membership marker posts, history backfills, or fallback DMs.
+Pending replies are skipped with `chat_left` when paused; an already-sending
+reply can still fail at WhatsApp and is logged.
+
+Submissions are FIFO per chat through MCP acceptance. Context-only posts use
+the outbound idempotency log and never start a response wait. Local duplicate
+suppression is durable, but a crash or ambiguous remote MCP acceptance can
+still leave a gap or duplicate; there is no remote exactly-once guarantee or
+catch-up job.
+
+### Rollout checks
+
+Set `PROMPTQL_PROJECT_NAME` if the deployed `ask_promptql` schema requires
+`project_name`; the adapter omits it when unset for older project-scoped servers.
+Before rollout, use a shopper token with `listTools()` to confirm
+`agent_response` support and whether `project_name` is required.
+
+Also verify that shopper B can post `force_skip` into a bot created by shopper A,
+and whether context-only posts consume credits. These checks require live
+shopper tokens and are not covered by unit tests. Group room placement remains
+unchanged: the first tagger's room is used, so participating service accounts
+must share access. A group-specific room model and group file attachments are
+deferred.
 
 The gateway emits **structured JSON logs** (one object per line) to **stderr**
 for cloud log aggregation. PII (phone numbers, jids, secrets) is masked, and

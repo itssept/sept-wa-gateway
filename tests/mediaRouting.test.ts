@@ -26,6 +26,7 @@ function inbound(
     },
     isGroup: false,
     fromMe: false,
+    mentionsSelf: false,
     ...overrides,
   };
 }
@@ -77,6 +78,7 @@ function makeRouter(ask: (input: unknown) => Promise<unknown>) {
     } as never,
     {
       claim: () => ({ status: "claimed", token: "claim-1" }),
+      markFailed: () => true,
     } as never,
     {
       dispatch: async () => undefined,

@@ -119,3 +119,39 @@ test("re-running migrations on an existing DB is a no-op (version bump safe)", (
     for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
   }
 });
+
+test("migration 5 upgrades existing bots and persists pause and relay dedup across restart", async () => {
+  const { Database } = await import("bun:sqlite");
+  const { MIGRATIONS } = await import("../src/storage/schema.ts");
+  const { OutboundLog } = await import("../src/storage/outboundLog.ts");
+  const path = tmpDbPath();
+  try {
+    const old = new Database(path, { create: true });
+    old.run("CREATE TABLE _gateway_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+    for (const migration of MIGRATIONS.filter((m) => m.version < 5)) {
+      old.run(migration.sql);
+      old.run("INSERT INTO _gateway_migrations VALUES (?, ?, ?)", [migration.version, migration.name, nowIso()]);
+    }
+    old.run("INSERT INTO chat_bot VALUES ('conn', '123@g.us', 's', 'bot', 'room', ?, ?)", [nowIso(), nowIso()]);
+    old.close();
+    const upgraded = openDatabase(path);
+    const bots = new ChatBotRepo(upgraded);
+    expect(bots.get("conn", "123@g.us")?.relayPausedAt).toBeNull();
+    bots.pauseRelay("conn", "123@g.us");
+    const log = new OutboundLog(upgraded);
+    const claim = log.claim("conn", "relay");
+    if (claim.status !== "claimed") throw new Error("expected claim");
+    expect(log.markRelayed("conn", "relay", "wrong-token", "123@g.us")).toBe(false);
+    expect(log.markRelayed("conn", "relay", claim.token, "123@g.us")).toBe(true);
+    log.recordGatewayMessage("conn", "123@g.us", "sent-id");
+    upgraded.close();
+    const restarted = openDatabase(path);
+    expect(new ChatBotRepo(restarted).get("conn", "123@g.us")?.threadId).toBe("bot");
+    expect(new ChatBotRepo(restarted).get("conn", "123@g.us")?.relayPausedAt).toBeString();
+    expect(new OutboundLog(restarted).claim("conn", "relay").status).toBe("already_sent");
+    expect(new OutboundLog(restarted).isGatewayMessage("conn", "123@g.us", "sent-id")).toBe(true);
+    restarted.close();
+  } finally {
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+  }
+});

@@ -140,3 +140,16 @@ test("disabled shopper reached via sender is still rejected", () => {
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.reason).toBe("shopper_disabled");
 });
+
+test("group mappings never override the tagger or authorize an unregistered sender", () => {
+  const { ctx, db } = makeTestApp();
+  const group = "120363000000006913@g.us";
+  const mapped = seedShopper(ctx, "+14155551212");
+  const sender = seedShopper(ctx, "+14155559999");
+  ctx.mappings.upsert(CONN, group, mapped.id);
+  const result = ctx.resolver.resolve(CONN, group, sender.phoneE164);
+  expect(result.ok && result.shopper.id).toBe(sender.id);
+  const unknown = ctx.resolver.resolve(CONN, group, "+19999999999");
+  expect(unknown).toEqual({ ok: false, reason: "unregistered_sender" });
+  db.close();
+});

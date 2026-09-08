@@ -9,6 +9,7 @@
  * other's terminal write.
  */
 
+import { z } from "zod";
 import type { Database } from "bun:sqlite";
 import { nowIso, uuid } from "../util.ts";
 
@@ -84,6 +85,40 @@ export class OutboundLog {
       [ref.chatJid, ref.messageRef, nowIso(), connectionId, idempotencyKey, token],
     );
     return res.changes > 0;
+  }
+
+  /** A force_skip submission is terminal without a WhatsApp send or wait. */
+  markRelayed(connectionId: string, key: string, token: string, chatJid: string): boolean {
+    z.array(z.string().min(1)).length(4).parse([connectionId, key, token, chatJid]);
+    const res = this.db.run(
+      `UPDATE whatsapp_outbound_log SET status = 'sent', chat_jid = ?,
+         whatsapp_message_ref = NULL, updated_at = ?
+       WHERE connection_id = ? AND idempotency_key = ? AND claim_token = ?`,
+      [chatJid, nowIso(), connectionId, key, token],
+    );
+    return res.changes > 0;
+  }
+
+  /** Reserve the generated ID before Baileys can echo it, including send errors. */
+  recordGatewayMessage(connectionId: string, chatJid: string, messageId: string): void {
+    z.array(z.string().min(1)).length(3).parse([connectionId, chatJid, messageId]);
+    const ts = nowIso();
+    this.db.run(
+      `INSERT OR IGNORE INTO whatsapp_outbound_log
+        (connection_id, idempotency_key, chat_jid, whatsapp_message_ref, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'sent', ?, ?)`,
+      [connectionId, `gateway:${messageId}`, chatJid, messageId, ts, ts],
+    );
+  }
+
+  isGatewayMessage(connectionId: string, chatJid: string, messageId: string): boolean {
+    z.array(z.string().min(1)).length(3).parse([connectionId, chatJid, messageId]);
+    const row = this.db.query(
+      `SELECT whatsapp_message_ref FROM whatsapp_outbound_log
+       WHERE connection_id = ? AND idempotency_key = ? AND chat_jid = ?`,
+    ).get(connectionId, `gateway:${messageId}`, chatJid);
+    if (!row) return false;
+    return z.object({ whatsapp_message_ref: z.string() }).parse(row).whatsapp_message_ref === messageId;
   }
 
   markFailed(connectionId: string, idempotencyKey: string, token: string): boolean {

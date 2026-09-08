@@ -147,3 +147,44 @@ test("waiting_approval auto-declines and returns a console-approval notice", asy
   expect(toolCalls[1].name).toBe("respond_to_promptql_approval");
   expect(toolCalls[1].args).toEqual({ approval_id: "ap-1", decision: "decline" });
 });
+
+test("ask shapes group response control, instruction and configured project name", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: { thread_id: "bot" } } }],
+  });
+  const config = testConfig();
+  config.mcp.projectName = "sept";
+  const a = new PromptQlAdapter({ config, getToken: () => "tok" });
+  await a.ask("shopper-1", {
+    query: "[Alice] hello",
+    agentResponse: "force_respond",
+    systemInstruction: "Reply to the tagger.",
+  });
+  expect(toolCalls[0]!.args).toEqual({
+    query: "[Alice] hello", agent_response: "force_respond",
+    system_instruction: "Reply to the tagger.", project_name: "sept",
+  });
+});
+
+test("force_skip makes only the ask call; optional project name is omitted", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: { thread_id: "bot" } } }],
+  });
+  const a = new PromptQlAdapter(deps);
+  await a.ask("shopper-1", { query: "[Bob] context", threadId: "bot", agentResponse: "force_skip" });
+  expect(toolCalls).toHaveLength(1);
+  expect(toolCalls[0]!.args).toEqual({
+    query: "[Bob] context", thread_id: "bot", agent_response: "force_skip",
+  });
+});
+
+test("new MCP fields and returned bot handle are validated", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{ result: { structuredContent: { thread_id: 123 } } }],
+  });
+  const a = new PromptQlAdapter(deps);
+  await expect(a.ask("s", { query: "hello", agentResponse: "bad" as never })).rejects.toThrow();
+  await expect(a.ask("s", { query: "hello", projectName: "" })).rejects.toThrow();
+  expect(toolCalls).toHaveLength(0);
+  await expect(a.ask("s", { query: "hello" })).rejects.toThrow("invalid bot handle");
+});

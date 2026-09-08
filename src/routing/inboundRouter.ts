@@ -1,19 +1,8 @@
 /**
- * InboundRouter — inbound half of the message flow.
- *
- *  1. Resolve the chat jid to exactly one enabled shopper (+ active credential).
- *  2. Reject unknown/disabled/unmapped/credential-less senders — SILENT drop +
- *     audit log, no WhatsApp reply (respects anti-ban / never-unsolicited).
- *  3. Claim outbound idempotency on the inbound message id (replay-safe).
- *  4. Look up the chat's existing PromptQL bot (thread) for continuity; start a
- *     new one on the first message in the shopper's caller-owned room.
- *  5. ask_promptql under the shopper's service-account identity.
- *  6. Persist the bot handle + a durable workflow correlation, then hand off to
- *     the OutboundDispatcher (blocking wait -> paced send).
- *
- * Every inbound message is mirrored (forward policy = mirror-every).
+ * Group activation is opt-in by a registered shopper's tag, with no backfill.
+ * Once active, context-only messages are relayed without running the bot.
+ * DMs keep their existing routing and transient file delivery.
  */
-
 import type { InboundMessage } from "../whatsapp/socket.ts";
 import type { ShopperResolver } from "./resolver.ts";
 import {
@@ -26,9 +15,26 @@ import type { OutboundLog } from "../storage/outboundLog.ts";
 import type { AuditLog } from "../storage/auditLog.ts";
 import type { OutboundDispatcher } from "./outboundDispatcher.ts";
 import type { Logger } from "../logger.ts";
+import { groupQuery, senderLabel, GROUP_INSTRUCTION } from "./groupRelay.ts";
+import { nowIso } from "../util.ts";
+import type { SelfMembershipEvent } from "../whatsapp/groupEvents.ts";
 import { maskJid } from "../util.ts";
 
 export class InboundRouter {
+  private readonly chains = new Map<string, Promise<void>>();
+  private readonly membership = new Map<string, { epoch: number; ts: string }>();
+
+  private key(connectionId: string, chatJid: string): string {
+    return JSON.stringify([connectionId, chatJid]);
+  }
+
+  /** Immediate local pause, also fences a tag already waiting on MCP. */
+  onSelfMembership(event: SelfMembershipEvent): void {
+    const key = this.key(event.connectionId, event.groupJid);
+    this.membership.set(key, { epoch: (this.membership.get(key)?.epoch ?? 0) + 1, ts: nowIso() });
+    this.chatBots.pauseRelay(event.connectionId, event.groupJid);
+  }
+
   constructor(
     private readonly resolver: ShopperResolver,
     private readonly adapter: PromptQlAdapter,
@@ -41,15 +47,39 @@ export class InboundRouter {
   ) {}
 
   /** Handle one captured inbound message. Never throws to the caller. */
-  async handle(msg: InboundMessage): Promise<void> {
+  handle(msg: InboundMessage): Promise<void> {
+    const key = this.key(msg.connectionId, msg.chatJid);
+    const epoch = this.membership.get(key)?.epoch ?? 0;
+    const previous = this.chains.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.process(msg, key, epoch));
+    this.chains.set(key, run);
+    void run.finally(() => {
+      if (this.chains.get(key) === run) this.chains.delete(key);
+    }).catch(() => undefined);
+    return run;
+  }
+
+  private async process(msg: InboundMessage, key: string, epoch: number): Promise<void> {
     const corrId = msg.messageId;
     // corrId is the WhatsApp message id (opaque, not PII); bind it for the flow.
     const log = this.log.child({ corrId, chatJid: maskJid(msg.chatJid) });
+    let claimToken: string | null = null;
     try {
+      if (msg.fromMe && (!msg.isGroup ||
+        this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId))) return;
+      if (msg.isGroup && epoch !== (this.membership.get(key)?.epoch ?? 0)) return;
       // Ignore empty text/unknown messages. Media-only messages remain routable.
       if (!promptQlQuery(msg)) return;
 
-      const res = this.resolver.resolve(msg.connectionId, msg.chatJid, msg.senderPhoneE164);
+      const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
+      const sender = this.resolver.resolve(msg.connectionId, msg.chatJid, msg.senderPhoneE164);
+      const trigger = !msg.fromMe && (!msg.isGroup || msg.mentionsSelf) && sender.ok;
+      const relay = msg.isGroup && !trigger;
+      if (relay && (!existing || existing.relayPausedAt !== null)) return;
+
+      const res = relay
+        ? this.resolver.resolveShopper(existing!.shopperId)
+        : sender;
       if (!res.ok) {
         this.audit.record("inbound.rejected", {
           subjectType: "connection",
@@ -71,8 +101,7 @@ export class InboundRouter {
         return;
       }
 
-      // Continue the chat's existing bot (thread) when we have one.
-      const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
+      claimToken = claim.token;
       // Room is caller-owned: use the shopper's stored room_name verbatim.
       const roomName = shopper.roomName;
 
@@ -82,8 +111,10 @@ export class InboundRouter {
         resolvedVia: res.via, // "mapping" (admin-set) or "sender" (auto by phone)
       });
 
-      const files = this.loadPromptQlFiles(msg);
-      const query = promptQlQuery(msg, files.length > 0);
+      const files = msg.isGroup ? [] : this.loadPromptQlFiles(msg);
+      const query = msg.isGroup
+        ? groupQuery(msg, senderLabel(msg, sender.ok ? sender.shopper : undefined))
+        : promptQlQuery(msg, files.length > 0);
       if (!query) return;
 
       let ask;
@@ -95,6 +126,10 @@ export class InboundRouter {
           threadId: existing?.threadId ?? null,
           roomName: existing ? null : roomName,
           files,
+          ...(msg.isGroup ? {
+            agentResponse: relay ? "force_skip" as const : "force_respond" as const,
+            ...(!relay ? { systemInstruction: GROUP_INSTRUCTION } : {}),
+          } : {}),
         });
       } finally {
         // Drop references promptly after ask_promptql accepts or exhausts its
@@ -103,13 +138,22 @@ export class InboundRouter {
         files.length = 0;
       }
 
-      // Persist the bot handle for continuity, and a durable correlation.
+      if (relay) {
+        this.outboundLog.markRelayed(msg.connectionId, msg.messageId, claim.token, msg.chatJid);
+        log.info("group context relayed");
+        return; // force_skip never creates a workflow or waits for a response.
+      }
+
+      // A successful tag resumes relay, unless membership changed during ask.
+      const latestMembership = this.membership.get(key);
       this.chatBots.upsert({
         connectionId: msg.connectionId,
         chatJid: msg.chatJid,
         shopperId: shopper.id,
         threadId: ask.threadId,
         roomName: existing?.roomName ?? roomName,
+        relayPausedAt: msg.isGroup && latestMembership && latestMembership.epoch !== epoch
+          ? latestMembership.ts : null,
       });
       const workflow = this.workflows.create({
         connectionId: msg.connectionId,
@@ -137,7 +181,10 @@ export class InboundRouter {
           log.error("outbound dispatch failed", { err });
         });
     } catch (err) {
+      if (claimToken) this.outboundLog.markFailed(msg.connectionId, msg.messageId, claimToken);
       log.error("inbound error", { err });
+    } finally {
+      msg.media = null;
     }
   }
 

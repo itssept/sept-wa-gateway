@@ -86,6 +86,7 @@ const EnvSchema = z.object({
   // project name is a `project-name` query param inside this URL. Empty until
   // configured (MCP disabled). Auth scheme is separately configurable.
   PROMPTQL_MCP_URL: z.string().url().or(z.literal("")).default(""),
+  PROMPTQL_PROJECT_NAME: z.string().min(3).optional(),
   PROMPTQL_MCP_AUTH_SCHEME: z.string().default("pat"),
   PROMPTQL_MCP_PROTOCOL_VERSION: z.string().default("2025-03-26"),
   PROMPTQL_MCP_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -117,6 +118,7 @@ export interface Config {
   mcp: {
     /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
     endpoint: string;
+    projectName?: string;
     authScheme: string;
     protocolVersion: string;
     timeoutMs: number;
@@ -158,6 +160,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     mcp: {
       endpoint: e.PROMPTQL_MCP_URL,
+      projectName: e.PROMPTQL_PROJECT_NAME,
       authScheme: e.PROMPTQL_MCP_AUTH_SCHEME,
       protocolVersion: e.PROMPTQL_MCP_PROTOCOL_VERSION,
       timeoutMs: e.PROMPTQL_MCP_TIMEOUT_MS,

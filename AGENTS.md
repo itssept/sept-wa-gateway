@@ -42,26 +42,67 @@ A linked WhatsApp session can be **banned** by bad behavior. These are hard rule
 7. **Graceful shutdown uses `ws.close()`, never `logout()`** (logout unlinks the
    device and forces a re-pair). Persist creds, resume next boot.
 
-## The PromptQL MCP contract (verified live — do not re-guess)
+## The PromptQL MCP contract
 
-Verified against the live MCP server (probed 2026-09-04).
+The base ask/wait flow was verified live on 2026-09-04. Group response controls
+are covered by mocked boundary tests, not a live shopper-token test.
 
-- **Endpoint** = `<base>/mcp-server/mcp?project-name=<project>`. Project is a
-  **query param**. The full URL is config — one var, `PROMPTQL_MCP_URL`, set
-  verbatim (`config.mcp.endpoint`); never hardcode it.
-- **Auth**: `Authorization: pat <token>` (scheme configurable).
-- **Every response is SSE** (`text/event-stream`), including `initialize`. The
-  server is **sessionless** — do NOT send an invented `Mcp-Session-Id` (a bogus
-  one returns HTTP 500). `notifications/initialized` → HTTP 202.
-- **Flow**: `ask_promptql({query, thread_id?, room_name?})` →
-  `get_latest_promptql_thread_response` (blocking; re-poll on `analyzing`). On
-  `waiting_approval` the gateway **auto-declines** and notifies the shopper —
-  never auto-approve a sensitive action for a WhatsApp sender.
-- **Naming**: product concept is a "bot"; the MCP wire still uses `thread_id`
-  (compatibility migration). Say "bot" in docs/domain, keep `thread_id` on the
-  wire. Do NOT invent `bot_id` until PromptQL ships it.
-- **`src/promptql/promptqlAdapter.ts` is the ONLY place that shapes tool args.**
-  If a PromptQL release changes a schema, fix it there.
+- **Endpoint** is the full `PROMPTQL_MCP_URL`, including `?project-name=...`.
+  Never construct a different endpoint. `PROMPTQL_PROJECT_NAME`, when set,
+  also supplies the MCP tool's `project_name` argument. It is optional for
+  compatibility with the older project-scoped server. Check `listTools()` with
+  a shopper token before rollout to see whether the deployed schema requires it.
+- **Auth:** `Authorization: pat <token>` (scheme configurable).
+- Responses use SSE. The verified server is sessionless: do not invent a
+  `Mcp-Session-Id`. `notifications/initialized` returns HTTP 202.
+- Responding calls use `ask_promptql`, then
+  `get_latest_promptql_thread_response`. Re-poll on `analyzing`; auto-decline
+  `waiting_approval` and notify the shopper. Never auto-approve.
+- `force_skip` is a context-only post: **never wait for a response**, create a
+  response workflow, or send a WhatsApp reply for it.
+- Product concept: **bot**. Keep legacy `thread_id` on the wire and in storage.
+- **`src/promptql/promptqlAdapter.ts` is the only place that shapes MCP args.**
+  `agent_response`, `system_instruction`, and `project_name` belong there.
+
+## Group trigger, mirror and membership rules
+
+- Before the first registered shopper tag, groups are captured in
+  `whatsapp_message_store` only. **No MCP call and no backfill.**
+- A tag must mention the linked account's PN JID or LID in the current message's
+  `contextInfo.mentionedJid`. Strip device suffixes, but keep JID domains.
+  Quotes alone do not trigger. **`fromMe` never triggers.**
+- A registered, enabled shopper with an active credential triggers via
+  `force_respond`, under their own token. **Group mappings never override the
+  sender.** Several shoppers intentionally share one bot per group.
+- After activation, other messages use `force_skip` under the **last tagger's**
+  token (`chat_bot.shopper_id`). This includes unregistered members, their tags,
+  and manual messages from the linked phone, but excludes gateway-sent replies.
+- Every group post has a sender prefix. `senderLabel()` owns the format:
+  registered name plus full E.164 when available; otherwise E.164, or an explicit
+  opaque WhatsApp JID if no phone is known. Never invent a phone from LID digits.
+  Logs still mask all PII. Strip `@digits` from group text.
+- Group media uses a type marker plus caption, not `files`. DM file delivery is
+  unchanged.
+- Serialize submissions per `(connection_id, chat_jid)` through MCP acceptance,
+  not the response wait. Relays use the fenced outbound idempotency log.
+  Capture-only duplicates must never become backfill. There is no catch-up job.
+- Baileys 7.0.0-rc14 membership events contain **participant objects**, not
+  strings. Validate payloads with Zod; match `id`, `lid`, and `phoneNumber`
+  against `sock.user.id` and `sock.user.lid`.
+- Self-remove and self-add both set `chat_bot.relay_paused_at` for existing
+  rows. Self-add also covers removals missed during downtime. Membership alone
+  never creates a bot or calls MCP. Removal deletes cached group metadata.
+- While paused, capture only. The next registered tag continues the same
+  `thread_id` and resumes mirroring. A membership change during an in-flight
+  tag must not be erased when that call completes.
+- Paused outbound replies are skipped and logged as `chat_left`, including
+  replies waiting in the anti-ban queue. An already-sending reply may fail
+  normally. **No membership marker, DM fallback, or rejoin policy switch.**
+- Generate and persist gateway outbound IDs before Baileys can echo them.
+  Keep these IDs even if the send result is uncertain.
+- Room placement is deferred: a new group bot still uses the first tagger's
+  caller-owned room. All participating shopper service accounts must be able
+  to access that bot. Cross-shopper MCP access remains a rollout check.
 
 ## Security invariants
 
@@ -72,19 +113,12 @@ Verified against the live MCP server (probed 2026-09-04).
 - **Secrets are encrypted at rest** (Baileys session state, per-shopper MCP
   tokens) under `DATA_ENCRYPTION_KEY`. **Never log or return a raw secret** —
   the API returns only a `tokenFingerprint`. `.env` is git-ignored.
-- Shopper identity resolves in two steps (`src/routing/resolver.ts`): an internal
-  chat->shopper mapping wins if present; otherwise the gateway **auto-resolves by
-  the message SENDER's phone** (participant in a group, chat in a DM) to a
-  registered, enabled shopper. **PILOT OVERRIDE:** the sender-phone fallback
-  deliberately takes identity from the WhatsApp message — the opposite of the
-  original "never trust the message" rule — accepted for the pilot because
-  WhatsApp verifies a DM account owns its number. Unregistered senders (including
-  every other participant in a group) still fall through to a silent drop
-  (`unregistered_sender`). The mapping table (`MappingRepo` + `chat_mapping`) is
-  an **internal mechanism only** — there is deliberately NO mappings API, because
-  API users work in shoppers + phone numbers, not WhatsApp jids/lids. If a
-  chat-pinning workflow is ever needed, populate mappings internally, not over
-  `/api/v1`.
+- **DM identity:** an internal chat mapping wins; otherwise resolve the sender's
+  WhatsApp phone to a registered, enabled shopper with an active credential.
+  **Group identity:** only the sender's own registration can authorize a tag.
+  WhatsApp-provided sender phones are the accepted pilot identity source.
+  Unregistered senders never trigger work; their messages may be group context
+  after activation. There is deliberately no mappings API.
 - `connection_id` is a routing key, not an authorization boundary.
 
 ## Connection management & deploy
@@ -102,7 +136,7 @@ Verified against the live MCP server (probed 2026-09-04).
 
 ## Keying & storage
 
-- Media is downloaded promptly because WhatsApp CDN URLs expire, held only in
+- DM media is downloaded promptly because WhatsApp CDN URLs expire, held only in
   bounded memory while the PromptQL MCP submission is attempted, and then
   released. Never persist media to SQLite, disk, or object storage. Preserve
   the declared + streamed byte limits and attachment filename/MIME validation.
@@ -142,6 +176,7 @@ Verified against the live MCP server (probed 2026-09-04).
 
 ## Conventions
 
+- Use Zod at all new I/O boundaries.
 - Match the surrounding style. Keep comments explaining **why**, as the existing
   files do.
 - Keep MCP-specific code behind the adapter; keep Baileys code out of routing.
@@ -154,10 +189,10 @@ Kept visible per the handoff. Current choices are marked.
 
 | Decision | Current choice |
 |---|---|
-| DM vs group mapping model | **Same model** — any chat jid (DM or group) maps to a shopper. |
-| Mirror every message vs explicit invocation | **Mirror every** inbound message from a mapped shopper. |
+| DM vs group mapping model | DM mapping override or sender fallback; groups always trigger as the sender. |
+| Mirror every message vs explicit invocation | DMs respond as before. Groups require a registered tag to activate, then mirror with `force_skip`; only registered tags respond. |
 | One service account vs shopper + assistant identities | **One** MCP-scoped service account per shopper. Schema (`shopper_credential.label`) keeps room for a second identity. |
-| Response path: webhook / poll / other | **ask_promptql → blocking get_latest_promptql_thread_response** (verified). Re-poll on `analyzing`; auto-decline `waiting_approval`. |
+| Response path: webhook / poll / other | Responding asks wait for a reply. Context-only `force_skip` posts never wait. |
 | Bot (thread) continuity | **Persist per chat** in `chat_bot` — follow-up messages continue the same bot. |
 | Approvals (`waiting_approval`) | **Auto-decline + notify** the shopper to approve in the console. |
 | Thread room scoping | **Caller-owned per-shopper room** — `roomName` is set at registration and sent verbatim. The gateway does not derive or own room semantics. |

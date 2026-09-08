@@ -43,6 +43,20 @@ const PromptQlFilesSchema = z.array(PromptQlFileInputSchema).max(1);
 
 export type PromptQlFileInput = z.infer<typeof PromptQlFileInputSchema>;
 
+const AskArgsSchema = z.object({
+  query: z.string().min(1),
+  thread_id: z.string().min(1).optional(),
+  room_name: z.string().min(1).optional(),
+  project_name: z.string().min(3).optional(),
+  agent_response: z.enum(["auto", "force_respond", "force_skip"]).optional(),
+  system_instruction: z.string().min(1).optional(),
+  files: PromptQlFilesSchema.optional(),
+}).strict();
+const AskResponseSchema = z.object({
+  thread_id: z.string().min(1),
+  thread_event_id: z.string().min(1).nullish(),
+});
+
 export type BotResponse =
   | { status: "completed"; message: string }
   | { status: "declined_approval"; message: string }
@@ -109,25 +123,31 @@ export class PromptQlAdapter {
       threadId?: string | null;
       roomName?: string | null;
       files?: PromptQlFileInput[];
+      agentResponse?: "auto" | "force_respond" | "force_skip";
+      systemInstruction?: string;
+      projectName?: string;
     },
   ): Promise<AskResult> {
-    const args: Record<string, unknown> = { query: input.query };
-    if (input.threadId) args.thread_id = input.threadId;
-    if (input.roomName) args.room_name = input.roomName;
-    if (input.files?.length) {
-      // Validate the new outbound MCP I/O boundary before transmission.
-      args.files = PromptQlFilesSchema.parse(input.files);
-    }
+    // Project-scoped servers may omit project_name from their schema. Keep it
+    // optional for the existing endpoint; configure it for servers requiring it.
+    const args = AskArgsSchema.parse({
+      query: input.query,
+      ...(input.threadId ? { thread_id: input.threadId } : {}),
+      ...(input.roomName ? { room_name: input.roomName } : {}),
+      ...(input.files?.length ? { files: input.files } : {}),
+      ...(input.agentResponse !== undefined ? { agent_response: input.agentResponse } : {}),
+      ...(input.systemInstruction !== undefined ? { system_instruction: input.systemInstruction } : {}),
+      ...((input.projectName ?? this.deps.config.mcp.projectName) !== undefined
+        ? { project_name: input.projectName ?? this.deps.config.mcp.projectName } : {}),
+    });
 
     const result = await this.session(shopperId).callTool(TOOL_ASK, args);
-    const sc = (result.structured ?? {}) as {
-      thread_id?: string;
-      thread_event_id?: string;
-      status?: string;
-    };
-    if (!sc.thread_id) {
-      throw new McpError(`${TOOL_ASK} returned no thread_id: ${result.text}`, "protocol");
+    const parsed = AskResponseSchema.safeParse(result.structured);
+    if (!parsed.success) {
+      // Never include untrusted response content in a loggable error.
+      throw new McpError(`${TOOL_ASK} returned an invalid bot handle`, "protocol");
     }
+    const sc = parsed.data;
     return { threadId: sc.thread_id, threadEventId: sc.thread_event_id ?? null };
   }
 

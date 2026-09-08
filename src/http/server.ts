@@ -39,6 +39,8 @@ async function main(): Promise<void> {
     ctx.messages,
     {
       onInbound: (msg) => router?.handle(msg),
+      onSelfRemoved: (event) => router?.onSelfMembership(event),
+      onSelfAdded: (event) => router?.onSelfMembership(event),
       onLoggedOut: (connId) => {
         ctx.audit.record("connection.logged_out", {
           subjectType: "connection",
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
     connection,
     config,
     ctx.log.child({ component: "outbound" }),
+    ctx.chatBots,
   );
 
   router = new InboundRouter(

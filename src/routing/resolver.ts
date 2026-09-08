@@ -4,8 +4,8 @@
  * and silently drop (no WhatsApp reply — respects anti-ban / no unsolicited).
  *
  * Resolution order:
- *   1. An explicit chat->shopper mapping (admin-set) wins, if present. This is
- *      the original, strongest trust boundary and stays as an override.
+ *   1. In DMs, an explicit chat->shopper mapping wins, if present.
+ *      Groups ignore mappings: a tag always runs as its sender.
  *   2. Otherwise, auto-resolve by the message SENDER's phone number: a DM's
  *      sender is the chat; a group message's sender is the participant. If that
  *      number is a registered, enabled shopper with an active credential, route
@@ -15,9 +15,11 @@
  * (the sender's number), which the manual-mapping model deliberately avoided.
  * This is an intentional override for the pilot — see AGENTS.md / README. It is
  * safe-ish because WhatsApp verifies the account owns its number; unregistered
- * senders (including everyone else in a group) still fall through to a drop.
+ * senders cannot trigger the bot. Active groups can still relay their messages
+ * as context, using the last tagger's credential.
  */
 
+import { isGroupJid } from "../util.ts";
 import type { ResolveResult } from "../domain/types.ts";
 import type { Shopper } from "../domain/types.ts";
 import type { ShopperRepo } from "../storage/shopperRepo.ts";
@@ -41,7 +43,7 @@ export class ShopperResolver {
     chatJid: string,
     senderPhoneE164?: string | null,
   ): ResolveResult {
-    const mapping = this.mappings.get(connectionId, chatJid);
+    const mapping = isGroupJid(chatJid) ? null : this.mappings.get(connectionId, chatJid);
     if (mapping) {
       if (mapping.status !== "enabled") return { ok: false, reason: "mapping_disabled" };
       const shopper = this.shoppers.getById(mapping.shopperId);
@@ -56,6 +58,11 @@ export class ShopperResolver {
     }
 
     return { ok: false, reason: "unmapped" };
+  }
+
+  /** Relays act as the last tagger, not the unregistered message author. */
+  resolveShopper(shopperId: string): ResolveResult {
+    return this.finalize(this.shoppers.getById(shopperId), "sender");
   }
 
   /** Shared enabled + has-active-credential gate for a resolved shopper. */

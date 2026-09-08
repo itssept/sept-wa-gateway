@@ -97,6 +97,13 @@ secrets), never baked into the image. See `.env.example` for the annotated list.
 
 ### Optional (sensible defaults)
 
+`PROMPTQL_PROJECT_NAME` is optional and unset by default. It supplies
+`ask_promptql.project_name` when required by the deployed shopper-token tool
+schema. Use the same project as the MCP URL. Context-only group relays require
+`agent_response: force_skip` support. Check both with a shopper token before
+rollout.
+
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `GATEWAY_API_PORT` | `8790` | HTTP API port. |
