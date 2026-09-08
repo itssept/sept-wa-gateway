@@ -38,10 +38,11 @@ function setup(wait = 1000) {
   const calls: Array<{ identity: PostingIdentity; input: any }> = [];
   const dispatches: unknown[] = [];
   let failQuery: string | null = null;
+  let botNumber = 0;
   router = new InboundRouter(ctx.resolver, { ask: async (identity: PostingIdentity, input: any) => {
     calls.push({ identity, input: structuredClone(input) });
     if (input.query === failQuery) throw new AskSubmissionError("sent_message_failed", { threadId: "bot", threadEventId: null });
-    return { threadId: input.threadId ?? "bot", threadEventId: "event" };
+    return { threadId: input.threadId ?? (++botNumber === 1 ? "bot" : `bot-${botNumber}`), threadEventId: "event" };
   } } as never, ctx.workflows, ctx.chatBots, ctx.outboundLog,
   { dispatch: async (v: unknown) => { dispatches.push(v); } } as never, ctx.audit, ctx.log, {
     settings: ctx.gatewaySettings, messages: ctx.messages,
@@ -213,4 +214,37 @@ test("replay never triggers even for client tags and does nothing when Client se
   expect(app.calls).toHaveLength(3);
   expect(app.calls.every((c) => c.identity.role === "client" && c.input.agentResponse === "force_skip")).toBe(true);
   expect(app.dispatches).toEqual([]);
+});
+
+test("late history promotes a common bot after registration and recovers old pending text only on the old bot", async () => {
+  const app = setup(0);
+  app.ctx.shoppers.setStatus(app.owner.id, "disabled");
+  app.membership("add");
+  await app.live(message("before-registration", 100));
+  expect(app.calls[0]!.input.roomName).toBe("common");
+  expect(app.ctx.chatBots.get("test-conn", GROUP)?.shopperId).toBeNull();
+  app.ctx.chatBots.setPendingPost("test-conn", GROUP, {
+    identity: { role: "client" }, query: "pending client text", messageId: "pending-client",
+  });
+  app.ctx.shoppers.setStatus(app.owner.id, "enabled");
+  await app.history([message("pending-client", 100), message("history-after-registration", 101)]);
+  expect(app.calls[1]!).toMatchObject({
+    identity: { role: "client" },
+    input: { threadId: "bot", query: "pending client text", agentResponse: "force_skip" },
+  });
+  expect(app.calls[2]!.input).toMatchObject({
+    threadId: null, roomName: app.owner.roomName,
+    query: "Replaying 1 messages from group history, oldest first",
+  });
+  expect(app.calls.some((c) => c.input.query === "pending-client")).toBe(false);
+  expect(app.calls.slice(3).every((c) => c.input.threadId === "bot-2")).toBe(true);
+  expect(app.calls.every((c) => c.input.agentResponse === "force_skip")).toBe(true);
+  expect(app.dispatches).toHaveLength(0);
+  expect(app.ctx.chatBots.get("test-conn", GROUP)).toMatchObject({
+    threadId: "bot-2", shopperId: app.owner.id, roomName: app.owner.roomName,
+  });
+  expect(app.ctx.chatBots.pendingPost("test-conn", GROUP)).toBeNull();
+  await app.live(message("next-live", 102));
+  expect(app.calls.at(-1)!.input.threadId).toBe("bot-2");
+  expect(app.dispatches).toHaveLength(1);
 });

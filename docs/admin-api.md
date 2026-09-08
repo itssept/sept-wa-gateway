@@ -191,6 +191,13 @@ Registration is **idempotent on phone**: an existing shopper returns `200`, a
 new one returns `201`. Re-registration updates `name`, `roomName`, and both
 tokens in one transaction. A disabled shopper is never implicitly re-enabled.
 
+If the phone previously relayed as an unknown Client, the next eligible DM
+message starts a new bot in the shopper's room. Groups that now qualify also
+switch from their ownerless common-room bot to a new bot in the selected
+owner's room, using the normal inviter/earliest-registration rule. Registration
+itself does not create bots or send WhatsApp messages. Existing shopper-owned
+bots keep their original owner and room, including after re-registration.
+
 Create both service accounts with MCP-scoped tokens and the shopper's
 **public** room in PromptQL first. The Shopper SA represents the shopper's
 own messages. The PA (personal assistant) SA answers clients on their behalf.
@@ -312,7 +319,10 @@ invalidates Client; rotate/revoke invalidate only the selected role.
   triggering. All participating identities need access to the public rooms.
 - Migration 8 preserves existing bot handles and freezes their owner/room.
   It permits ownerless common-room bots, records membership/inviter, and stores
-  pending text encrypted for partial MCP submission recovery.
+  pending text encrypted for partial MCP submission recovery. An ownerless
+  common bot can later be replaced by a new shopper-owned bot. Pending old-bot
+  text must finish recovery there first; the old bot and its accepted messages
+  remain unchanged.
 - `WHATSAPP_CAPTURE_GROUP_HISTORY` defaults to `true`.
   `WHATSAPP_HISTORY_JOIN_WAIT_MS` defaults to `5000`, integer `0` to `60000`.
   Late history replays before subsequent live traffic, but a few live messages

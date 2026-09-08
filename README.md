@@ -85,6 +85,15 @@ Owner and room are fixed when the bot is created. Another shopper's tag or
 removal/re-add never transfers ownership. Shopper and common rooms must be
 public so all three identities can access the same bot.
 
+If an unknown DM sender is registered as an enabled shopper, or a previously
+unqualified group gains an enabled registered shopper, the next eligible
+message starts a **new bot in the shopper's room**. Each chat switches
+independently. The old common-room bot is not moved or deleted, and already
+relayed messages are not copied. Pending pre-registration text is recovered
+on the old bot before switching; failed recovery blocks the switch. History
+can also initiate this transition, without triggering a response.
+Already shopper-owned bots keep their original owner and room.
+
 Client tags first relay with `force_skip`, then the owner's PA posts:
 `Please respond to the client message above on behalf of [shopper name].`
 This second post uses `force_respond`; its reply goes through the outbound

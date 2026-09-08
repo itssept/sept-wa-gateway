@@ -80,6 +80,12 @@ are covered by mocked boundary tests, not a live shopper-token test.
 - Owner is the shopper who added the linked number, otherwise the earliest
   registered enabled shopper in the group. Fix owner and public room when
   creating the bot. Never transfer on a tag or removal/re-add.
+- If an ownerless common-room chat becomes eligible for a shopper, start a NEW
+  bot in that shopper's room on the next eligible live/history submission.
+  Do not reparent the old bot or replay already-relayed messages. Resolve any
+  pending common-bot text there before switching. Persist the new owner/room
+  with a returned handle, including partial MCP failures; ordinary failures
+  leave the common mapping intact. Shopper-owned bots remain fixed.
 - Shopper text has no envelope or provenance prefix. Only Client posts use
   `formatClientEnvelope`. Preserve push name, opaque LID when phone is unknown,
   original document filename and voice-note `ptt`. Do not strip shopper text.

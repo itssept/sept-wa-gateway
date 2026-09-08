@@ -12,7 +12,7 @@ export function msg(overrides: Partial<InboundMessage> = {}): InboundMessage {
     fromMe: false, mentionsSelf: false, ...overrides,
   };
 }
-export function setup() {
+export function setup(newBotId: () => string = () => "shared-bot") {
   const app = makeTestApp();
   const { ctx } = app;
   ctx.gatewaySettings.set("client-token", "common-room");
@@ -32,7 +32,7 @@ export function setup() {
   const adapter = { ask: async (identity: PostingIdentity, input: any) => {
     calls.push({ identity, input: structuredClone(input) });
     await askHook?.(identity, input);
-    return { threadId: input.threadId ?? "shared-bot", threadEventId: "event" };
+    return { threadId: input.threadId ?? newBotId(), threadEventId: "event" };
   } };
   const router = new InboundRouter(
     ctx.resolver, adapter as never, ctx.workflows, ctx.chatBots, ctx.outboundLog,

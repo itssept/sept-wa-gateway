@@ -242,3 +242,38 @@ test("migration 8 preserves old bot owner/room and pending retry plus membership
     for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
   }
 });
+
+test("common bot replacement persists new owner and room without changing an existing bot's ownership", () => {
+  const path = tmpDbPath();
+  try {
+    const db = openDatabase(path);
+    const bots = new ChatBotRepo(db, ENC);
+    const common = { connectionId: "conn", chatJid: "123@g.us", shopperId: null, threadId: "common-bot", roomName: "common" };
+    bots.upsert(common);
+    // Changing identity on the same bot must not silently reparent it.
+    bots.upsert({ ...common, shopperId: "shopper", roomName: "shopper-room" });
+    expect(bots.get("conn", common.chatJid)).toMatchObject({ shopperId: null, roomName: "common" });
+
+    bots.upsert({ ...common, shopperId: "shopper", roomName: "shopper-room", threadId: "shopper-bot" });
+    bots.setPendingPost("conn", common.chatJid, {
+      identity: { role: "shopper", shopperId: "shopper" }, query: "retry new bot", messageId: "pending",
+    });
+    db.close();
+    const restarted = openDatabase(path);
+    try {
+      const restored = new ChatBotRepo(restarted, ENC);
+      expect(restored.get("conn", common.chatJid)).toMatchObject({
+        threadId: "shopper-bot", shopperId: "shopper", roomName: "shopper-room",
+      });
+      expect(restored.pendingPost("conn", common.chatJid)).toMatchObject({
+        identity: { role: "shopper", shopperId: "shopper" }, query: "retry new bot",
+      });
+      restored.upsert({ ...common, shopperId: "other-shopper", roomName: "other-room", threadId: "shopper-bot" });
+      expect(restored.get("conn", common.chatJid)).toMatchObject({ shopperId: "shopper", roomName: "shopper-room" });
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+  }
+});

@@ -109,7 +109,10 @@ export class ChatBotRepo {
     );
   }
 
-  /** Record (or update) the bot handle for a chat. */
+  /** Record a bot handle. Only a NEW shopper bot may replace an ownerless
+   * common bot; already shopper-owned bots never transfer owner or room.
+   * The caller must finish any old pending post before replacing the handle.
+   */
   upsert(input: {
     connectionId: string;
     chatJid: string;
@@ -130,7 +133,16 @@ export class ChatBotRepo {
          (connection_id, chat_jid, shopper_id, thread_id, room_name, created_at, updated_at, relay_paused_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (connection_id, chat_jid)
-       DO UPDATE SET thread_id = excluded.thread_id,
+       DO UPDATE SET
+                     shopper_id = CASE
+                       WHEN chat_bot.shopper_id IS NULL AND excluded.shopper_id IS NOT NULL
+                         AND chat_bot.thread_id != excluded.thread_id
+                       THEN excluded.shopper_id ELSE chat_bot.shopper_id END,
+                     room_name = CASE
+                       WHEN chat_bot.shopper_id IS NULL AND excluded.shopper_id IS NOT NULL
+                         AND chat_bot.thread_id != excluded.thread_id
+                       THEN excluded.room_name ELSE chat_bot.room_name END,
+                     thread_id = excluded.thread_id,
                      updated_at = excluded.updated_at,
                      relay_paused_at = excluded.relay_paused_at`,
       [

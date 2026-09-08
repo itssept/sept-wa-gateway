@@ -112,19 +112,22 @@ export class InboundRouter {
       const candidate = this.resolver.groupOwner(
         group.participants.flatMap((p) => p.phone_e164 ? [p.phone_e164] : []), authorPhone,
       );
-      // Existing bots never change room or owner, even if group qualification changes.
-      const ownerId = existing ? existing.shopperId : candidate?.id ?? null;
-      const owner = existing ? this.resolver.byId(ownerId) : candidate;
-      const roomName = existing?.roomName ?? owner?.roomName ?? this.deps.settings.getCommonRoomName();
+      // Shopper-owned bots stay fixed. A common-room bot is replaced when
+      // registration or membership makes this group qualify for a shopper.
+      const fixed = existing?.shopperId ? existing : null;
+      const ownerId = fixed?.shopperId ?? candidate?.id ?? null;
+      const owner = fixed ? this.resolver.byId(ownerId) : candidate;
+      const roomName = fixed?.roomName ?? owner?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
       if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
       return { owner, ownerId, roomName, qualified: Boolean(candidate) };
     }
     // fromMe is the linked phone, so use its peer to determine a fresh DM's owner.
     const peerPhone = msg.fromMe ? phoneE164FromJid(msg.chatJid) : msg.senderPhoneE164;
     const candidate = this.resolver.registered(peerPhone);
-    const ownerId = existing ? existing.shopperId : candidate?.id ?? null;
-    const owner = existing ? this.resolver.byId(ownerId) : candidate;
-    const roomName = existing?.roomName ?? candidate?.roomName ?? this.deps.settings.getCommonRoomName();
+    const fixed = existing?.shopperId ? existing : null;
+    const ownerId = fixed?.shopperId ?? candidate?.id ?? null;
+    const owner = fixed ? this.resolver.byId(ownerId) : candidate;
+    const roomName = fixed?.roomName ?? candidate?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
     if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
     return { owner, ownerId, roomName, qualified: false };
   }
@@ -153,10 +156,13 @@ export class InboundRouter {
     rememberFailure = true, messageId?: string,
   ): Promise<AskResult> {
     const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
+    // Never continue the common bot using a newly registered shopper's
+    // destination. Keep the old mapping until MCP returns a new handle.
+    const promoting = existing?.shopperId === null && dest.ownerId !== null;
     try {
       const ask = await this.adapter.ask(identity, {
-        query, threadId: existing?.threadId ?? null,
-        roomName: existing ? null : dest.roomName, agentResponse, files,
+        query, threadId: promoting ? null : existing?.threadId ?? null,
+        roomName: !existing || promoting ? dest.roomName : null, agentResponse, files,
       });
       this.remember(msg, dest, ask);
       return ask;
@@ -171,11 +177,18 @@ export class InboundRouter {
     }
   }
 
-  private async retryPending(msg: InboundMessage, dest: Destination): Promise<void> {
+  private async retryPending(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">, dest: Destination): Promise<void> {
     const pending = this.chatBots.pendingPost(msg.connectionId, msg.chatJid);
     if (!pending) return;
+    // Pending text belongs to the stored bot, not a newly eligible destination.
+    // Finish recovery there before switching the chat to a shopper-owned bot.
+    const existing = this.chatBots.get(msg.connectionId, msg.chatJid)!;
+    const pendingDest = {
+      ...dest, ownerId: existing.shopperId, owner: this.resolver.byId(existing.shopperId),
+      roomName: existing.roomName ?? dest.roomName,
+    };
     if (pending.identity.role === "client" && !this.clientReady(msg.connectionId, msg.chatJid)) throw new Error("Gateway setup incomplete");
-    await this.submit(msg, dest, pending.identity, pending.query, "force_skip", [], true, pending.messageId);
+    await this.submit(msg, pendingDest, pending.identity, pending.query, "force_skip", [], true, pending.messageId);
     if (pending.messageId) {
       this.deps.messages.markRelayed(msg.connectionId, msg.chatJid, pending.messageId);
       const claim = this.outboundLog.claim(msg.connectionId, pending.messageId);
@@ -253,11 +266,20 @@ export class InboundRouter {
     const epoch = this.epochs.get(key) ?? 0;
     return this.enqueue(key, async () => {
       const msg = { connectionId: parsed.connectionId, chatJid: parsed.groupJid, isGroup: true, senderPhoneE164: null, fromMe: false };
-      const rows = this.deps.messages.listUnrelayedHistory(msg.connectionId, msg.chatJid);
+      let rows = this.deps.messages.listUnrelayedHistory(msg.connectionId, msg.chatJid);
       if (!rows.length || !this.available(msg, epoch) || !this.clientReady(msg.connectionId, msg.chatJid)) return;
       const dest = await this.destination(msg);
       if (!dest || !this.available(msg, epoch)) return;
       try {
+        // History can be the first traffic after registration too. Do not
+        // carry the old common bot's live retry into the replacement bot.
+        if (this.chatBots.get(msg.connectionId, msg.chatJid)?.shopperId === null && dest.ownerId !== null) {
+          await this.retryPending(msg, dest);
+          if (!this.available(msg, epoch)) return;
+          // A recovered live message may also have arrived in this history batch.
+          rows = this.deps.messages.listUnrelayedHistory(msg.connectionId, msg.chatJid);
+          if (!rows.length) return;
+        }
         await this.submit(msg, dest, CLIENT, `Replaying ${rows.length} messages from group history, oldest first`, "force_skip", [], false);
         for (const row of rows) {
           if (!this.available(msg, epoch)) return;
