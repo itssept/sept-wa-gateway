@@ -4,7 +4,9 @@
  */
 
 import { test, expect, afterEach } from "bun:test";
-import { PromptQlAdapter, AskSubmissionError, promptQlFileFromMedia } from "../src/promptql/promptqlAdapter.ts";
+import {
+  PromptQlAdapter, AskSubmissionError, promptQlFileFromMedia, parseArtifactRefs,
+} from "../src/promptql/promptqlAdapter.ts";
 import { testConfig } from "./helpers.ts";
 import { TransientMediaDownloader } from "../src/whatsapp/media.ts";
 import { createLogger } from "../src/logger.ts";
@@ -350,4 +352,111 @@ test("shopper, PA, second shopper and Client use isolated sessions; invalidation
   await expect(a.ask(client, { query: "x" })).rejects.toThrow("no active MCP credential");
   await a.ask(shopper, { query: "x" });
   expect(calls.at(-1)!.auth).toBe("pat shop-token");
+});
+
+// --- Artifact relay -------------------------------------------------------
+
+test("parseArtifactRefs extracts inline references and strips the tags", () => {
+  const { text, refs } = parseArtifactRefs(
+    'Done! Here is a chart.\n<artifact type="text" identifier="simple-text" />\nEnjoy.',
+  );
+  expect(refs).toEqual([{ identifier: "simple-text", type: "text" }]);
+  expect(text).toBe("Done! Here is a chart.\nEnjoy.");
+});
+
+test("parseArtifactRefs dedupes, tolerates attribute order, and requires an identifier", () => {
+  const { text, refs } = parseArtifactRefs(
+    'A<artifact identifier="x" type="table"/> B<artifact type="text" identifier="x"/> ' +
+      'C<artifact type="text"/> D<artifact identifier="y" />',
+  );
+  // Same identifier collapses; a tag without identifier is ignored.
+  expect(refs).toEqual([
+    { identifier: "x", type: "table" },
+    { identifier: "y", type: null },
+  ]);
+  expect(text).toBe("A B C D");
+});
+
+test("resolveArtifacts fetches referenced artifacts by metadata id/version as documents", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [
+      // list_promptql_thread_artifact_metadata
+      { result: { structuredContent: { artifacts: [
+        { artifact_id: "aid-1", identifier: "sales", title: "Sales", artifact_type: "table", version: 3 },
+      ] } } },
+      // get_promptql_artifact
+      { result: { structuredContent: {
+        artifact_type: "table", data: [{ a: 1 }],
+      } } },
+    ],
+  });
+  const a = new PromptQlAdapter(deps);
+  const out = await a.resolveArtifacts(
+    "shopper-1", "t1", [{ identifier: "sales", type: "table" }], 1024 * 1024,
+  );
+  expect(toolCalls[0]!.name).toBe("list_promptql_thread_artifact_metadata");
+  expect(toolCalls[0]!.args).toEqual({ thread_id: "t1" });
+  expect(toolCalls[1]!.name).toBe("get_promptql_artifact");
+  // Matched by artifact_id + version from metadata, not the display title.
+  expect(toolCalls[1]!.args).toEqual({ artifact_id: "aid-1", version: 3 });
+  expect(out).toHaveLength(1);
+  expect(out[0]!.ok).toBe(true);
+  const art = out[0]!.ok ? out[0]!.artifact : null;
+  expect(art!.identifier).toBe("sales");
+  expect(art!.mimeType).toBe("text/csv");
+  expect(art!.fileName).toBe("artifact-sales.csv");
+  expect(art!.bytes.toString("utf8")).toBe(JSON.stringify([{ a: 1 }], null, 2));
+});
+
+test("resolveArtifacts falls back to identifier when metadata is unavailable", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [
+      { result: { isError: true, content: [{ type: "text", text: "no metadata" }] } },
+      { result: { structuredContent: { content_base64: "AAH+/w==", mime_type: "application/pdf" } } },
+    ],
+  });
+  const a = new PromptQlAdapter(deps);
+  const out = await a.resolveArtifacts(
+    "shopper-1", "t1", [{ identifier: "doc-9", type: null }], 1024 * 1024,
+  );
+  expect(toolCalls[1]!.args).toEqual({ artifact_id: "doc-9" });
+  expect(out).toHaveLength(1);
+  const art = out[0]!.ok ? out[0]!.artifact : null;
+  expect(art!.mimeType).toBe("application/pdf");
+  expect([...art!.bytes]).toEqual([0, 1, 254, 255]);
+});
+
+test("resolveArtifacts reports too_large / unavailable failures in referenced order", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [
+      { result: { structuredContent: { artifacts: [] } } },
+      // big — exceeds the 8-byte cap below
+      { result: { structuredContent: { text: "way too large for the cap" } } },
+      // fetch error for the second ref
+      { result: { isError: true, content: [{ type: "text", text: "boom" }] } },
+      // small — fits
+      { result: { structuredContent: { type: "text", text: "ok" } } },
+    ],
+  });
+  const a = new PromptQlAdapter(deps);
+  const out = await a.resolveArtifacts(
+    "shopper-1", "t1",
+    [{ identifier: "big", type: "text" }, { identifier: "err", type: null }, { identifier: "small", type: "text" }],
+    8,
+  );
+  // One outcome per reference, in order: oversized, unavailable, then the file.
+  expect(out).toHaveLength(3);
+  expect(out[0]).toEqual({ ok: false, identifier: "big", reason: "too_large" });
+  expect(out[1]).toEqual({ ok: false, identifier: "err", reason: "unavailable" });
+  expect(out[2]!.ok).toBe(true);
+  expect((out[2] as any).artifact.bytes.toString("utf8")).toBe("ok");
+  // 1 list + 3 fetches attempted.
+  expect(toolCalls).toHaveLength(4);
+});
+
+test("resolveArtifacts returns nothing for no references and makes no calls", async () => {
+  const { toolCalls } = scriptByTool({ toolResults: [] });
+  const a = new PromptQlAdapter(deps);
+  expect(await a.resolveArtifacts("shopper-1", "t1", [], 1024)).toEqual([]);
+  expect(toolCalls).toHaveLength(0);
 });

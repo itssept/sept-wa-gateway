@@ -852,6 +852,64 @@ export class WhatsAppConnection {
   }
 
   /**
+   * Send a document (file) attachment through the anti-ban queue. Used to relay
+   * PromptQL artifacts back to the chat. Same pacing/serialization as sendText —
+   * a document is a typed message, so it keeps the composing presence + delay.
+   * Never call sock.sendMessage directly. Returns the Baileys message key id.
+   */
+  async sendDocument(
+    chatJid: string,
+    document: { bytes: Buffer; fileName: string; mimeType: string; caption?: string },
+    options: {
+      pacingProfile?: PacingProfile;
+      beforeSend?: () => boolean;
+      onMessageId?: (id: string) => void;
+    } = {},
+  ): Promise<string> {
+    const { fileName, mimeType, caption } = z.object({
+      chatJid: z.string().min(1),
+      fileName: z.string().min(1).max(255),
+      mimeType: z.string().min(1).max(255),
+      caption: z.string().optional(),
+      pacingProfile: PacingProfileSchema.optional(),
+    }).parse({
+      chatJid, fileName: document.fileName, mimeType: document.mimeType,
+      caption: document.caption, pacingProfile: options.pacingProfile,
+    });
+    const bytes = z.instanceof(Buffer).parse(document.bytes);
+    const sock = this.live.sock;
+    if (!sock || this.live.status !== "linked") {
+      throw new Error(`connection ${this.config.connectionId} is not linked`);
+    }
+    const ctx: SendContext = {
+      connectionId: this.config.connectionId,
+      chatJid,
+      // Pace like a short message: an attachment's typing time is not its size.
+      textLength: caption?.length ?? fileName.length,
+      pacingProfile: options.pacingProfile,
+      linkedAtMs: this.live.linkedAtMs,
+      setComposing: async () => {
+        await sock.sendPresenceUpdate("composing", chatJid);
+      },
+      clearComposing: async () => {
+        await sock.sendPresenceUpdate("paused", chatJid);
+      },
+    };
+    return this.antiBan.enqueue(ctx, async () => {
+      if (options.beforeSend && !options.beforeSend()) throw new Error("chat_left");
+      const messageId = generateMessageIDV2(sock.user?.id);
+      options.onMessageId?.(messageId);
+      const sent = await sock.sendMessage(
+        chatJid,
+        { document: bytes, fileName, mimetype: mimeType, ...(caption ? { caption } : {}) },
+        { messageId },
+      );
+      const parsed = z.object({ key: z.object({ id: z.string().min(1) }) }).parse(sent);
+      return parsed.key.id;
+    });
+  }
+
+  /**
    * React to a message with an emoji (e.g. 👀 to signal "the agent will respond").
    * Best-effort: goes through the anti-ban queue (token bucket + per-chat
    * serialization) but skips the typing presence/delay since a reaction is not a

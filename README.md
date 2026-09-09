@@ -61,6 +61,17 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
 - The raw-media limit is 7 MiB; the complete MCP request is capped at 10 MiB.
   A partial MCP failure preserves any returned bot handle. Its text is retained
   encrypted and retried without media or a bot run on the next message.
+- When a completed response references artifacts inline
+  (`<artifact identifier="..."/>`), those artifacts are fetched
+  (`list_promptql_thread_artifact_metadata` → `get_promptql_artifact`, matched by
+  `artifact_id`/identifier, never the display title) and delivered **together
+  with the text**: the reply text becomes the caption on the first document, and
+  any further artifacts follow as their own documents. The inline tags are
+  stripped from the text. Each artifact is capped at `PROMPTQL_MAX_ARTIFACT_BYTES`
+  (16 MiB). An oversized or unfetchable artifact is skipped and audited, and a
+  short note is appended to the reply in brackets, e.g.
+  `(Attachment too large to send)` or `(Attachment couldn't be retrieved)`. The
+  text reply is always delivered regardless.
 - Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`. Missing Client
   setup drops Client traffic with an audit/log, without a WhatsApp reply.
 
@@ -134,8 +145,11 @@ Replay never triggers a bot run or sends a WhatsApp reply.
 Set `PROMPTQL_PROJECT_NAME` if the deployed MCP schema requires it. Before
 rollout, confirm `agent_response` and file support using live shopper, PA and
 Client tokens, and confirm that all identities can post into the public rooms
-and each other's bots. Tests mock these boundaries; they are not a live
-WhatsApp or production-token validation.
+and each other's bots. Also confirm the artifact tools
+(`list_promptql_thread_artifact_metadata`, `get_promptql_artifact`) and their
+exact argument names with `bun run mcp:discover`; the adapter assumes
+`thread_id` / `artifact_id` / `version`. Tests mock these boundaries; they are
+not a live WhatsApp or production-token validation.
 
 The gateway emits **structured JSON logs** (one object per line) to **stderr**
 for cloud log aggregation. PII (phone numbers, jids, secrets) is masked, and

@@ -26,6 +26,8 @@ import { McpSession, McpError } from "./mcpClient.ts";
 const TOOL_ASK = "ask_promptql";
 const TOOL_WAIT = "get_latest_promptql_thread_response";
 const TOOL_RESPOND_APPROVAL = "respond_to_promptql_approval";
+const TOOL_LIST_ARTIFACTS = "list_promptql_thread_artifact_metadata";
+const TOOL_GET_ARTIFACT = "get_promptql_artifact";
 
 export interface AskResult {
   threadId: string;
@@ -62,6 +64,106 @@ export function promptQlFileFromMedia(
     content_base64: bytes.toString("base64"),
   });
 }
+
+/**
+ * An artifact referenced by the final response, fetched and ready to relay to
+ * WhatsApp as a document attachment. Bytes are transient — the caller sends
+ * them and never persists them, exactly like inbound media.
+ */
+export interface ResolvedArtifact {
+  identifier: string;
+  title: string;
+  fileName: string;
+  mimeType: string;
+  bytes: Buffer;
+}
+
+/** Why a referenced artifact could not be attached. The caller surfaces this to
+ *  the user as a short note; keep the set small so wording stays consistent. */
+export type ArtifactFailureReason = "too_large" | "unavailable";
+
+/** The per-reference outcome of resolveArtifacts: either sendable bytes or a
+ *  reason the artifact was dropped. Order matches the referenced order. */
+export type ArtifactOutcome =
+  | { ok: true; artifact: ResolvedArtifact }
+  | { ok: false; identifier: string; reason: ArtifactFailureReason };
+
+/** A reference parsed out of the final response's inline <artifact .../> tags. */
+export interface ArtifactRef {
+  identifier: string;
+  type: string | null;
+}
+
+// A self-closing tag the bot embeds in its final text, e.g.
+//   <artifact type="text" identifier="simple-text" />
+// Attribute order is not guaranteed, so match identifier and type independently
+// within a single tag. Only the identifier is required to fetch the artifact.
+const ARTIFACT_TAG = /<artifact\b[^>]*\/?>/gi;
+const ATTR = (name: string) => new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, "i");
+const IDENTIFIER_ATTR = ATTR("identifier");
+const TYPE_ATTR = ATTR("type");
+
+/**
+ * Parse the inline artifact references out of a final response and return the
+ * references plus the text with those tags removed. We relay ONLY artifacts the
+ * bot explicitly referenced inline; duplicates (same identifier) collapse to the
+ * first occurrence. The stripped text is what we send to WhatsApp.
+ */
+export function parseArtifactRefs(text: string): { text: string; refs: ArtifactRef[] } {
+  const refs: ArtifactRef[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(ARTIFACT_TAG)) {
+    const tag = match[0];
+    const identifier = IDENTIFIER_ATTR.exec(tag)?.[1]?.trim();
+    if (!identifier || seen.has(identifier)) continue;
+    seen.add(identifier);
+    refs.push({ identifier, type: TYPE_ATTR.exec(tag)?.[1]?.trim() || null });
+  }
+  // Drop the tags and tidy the whitespace they leave behind so the sent text
+  // reads naturally without the machine markup. A tag that owns its whole line
+  // (only whitespace around it) takes that line with it; an inline tag mid-text
+  // is removed in place, leaving the surrounding words spaced as written.
+  const ownLine = new RegExp(`^[ \\t]*${ARTIFACT_TAG.source}[ \\t]*$`, "gim");
+  const stripped = text
+    .replace(ownLine, "\x00") // mark whole-line tags for their newline to go too
+    .replace(ARTIFACT_TAG, "") // remaining inline tags: remove in place
+    .replace(/\n?\x00\n?/g, "\n") // collapse a marked line into a single break
+    .replace(/ {2,}/g, " ") // squeeze the gap an inline tag left between words
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { text: stripped, refs };
+}
+
+// Artifact metadata as returned by list_promptql_thread_artifact_metadata. The
+// exact wire shape can vary across PromptQL releases, so match by artifact_id or
+// identifier and treat everything else as optional/best-effort.
+const ArtifactMetadataSchema = z.object({
+  artifact_id: z.string().min(1).optional(),
+  identifier: z.string().min(1).optional(),
+  title: z.string().optional(),
+  artifact_type: z.string().optional(),
+  type: z.string().optional(),
+  version: z.union([z.string(), z.number()]).optional(),
+}).passthrough();
+type ArtifactMetadata = z.infer<typeof ArtifactMetadataSchema>;
+
+// A fetched artifact from get_promptql_artifact. PromptQL may return the payload
+// as base64 (binary) OR as a text/data field (text, tables, json). We accept
+// both and normalize to bytes downstream.
+const ArtifactPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  identifier: z.string().optional(),
+  title: z.string().optional(),
+  artifact_type: z.string().optional(),
+  type: z.string().optional(),
+  mime_type: z.string().optional(),
+  file_name: z.string().optional(),
+  content_base64: z.string().optional(),
+  data_base64: z.string().optional(),
+  text: z.string().optional(),
+  data: z.unknown().optional(),
+}).passthrough();
 
 const AskStatusSchema = z.enum([
   "success", "upload_failed", "system_trigger_failed",
@@ -261,6 +363,127 @@ export class PromptQlAdapter {
     return { status: "failed", message: "PromptQL did not respond before the deadline." };
   }
 
+  /**
+   * Resolve the artifacts a completed response referenced inline. For each
+   * `<artifact identifier="..."/>` tag, look up its metadata (for id/version/
+   * title), fetch the artifact, and return it as ready-to-send bytes.
+   *
+   * Returns one outcome per reference, IN THE REFERENCED ORDER: either sendable
+   * bytes or a reason (too_large / unavailable) the caller can surface as a
+   * short note. Resolution never throws for a single artifact — one bad artifact
+   * cannot fail the reply.
+   *
+   * `maxBytes` caps each artifact's decoded size; anything larger is `too_large`.
+   * Bytes are transient — the caller sends them and must not persist them.
+   */
+  async resolveArtifacts(
+    shopperId: IdentityInput,
+    threadId: string,
+    refs: ArtifactRef[],
+    maxBytes: number,
+  ): Promise<ArtifactOutcome[]> {
+    if (refs.length === 0) return [];
+    const session = this.session(shopperId);
+    const metaByIdentifier = await this.artifactMetadata(session, threadId);
+    const outcomes: ArtifactOutcome[] = [];
+    for (const ref of refs) {
+      try {
+        const meta = metaByIdentifier.get(ref.identifier);
+        // Match by artifact_id or exact identifier — never by display title.
+        const artifactId = meta?.artifact_id ?? ref.identifier;
+        const version = meta?.version;
+        const args: Record<string, unknown> = { artifact_id: artifactId };
+        if (version !== undefined) args.version = version;
+        const result = await session.callTool(TOOL_GET_ARTIFACT, args);
+        const decoded = this.decodeArtifact(ref, meta, result.structured, result.text, maxBytes);
+        if ("artifact" in decoded) {
+          outcomes.push({ ok: true, artifact: decoded.artifact });
+        } else {
+          this.log.warn("artifact skipped", { identifier: maskArtifact(ref.identifier), reason: decoded.reason });
+          outcomes.push({ ok: false, identifier: ref.identifier, reason: decoded.reason });
+        }
+      } catch (err) {
+        // Never let one artifact fail the whole reply. The server's error body
+        // may carry artifact content/PII, so log only the (non-sensitive) id.
+        this.log.warn("artifact fetch failed", { identifier: maskArtifact(ref.identifier), err });
+        outcomes.push({ ok: false, identifier: ref.identifier, reason: "unavailable" });
+      }
+    }
+    return outcomes;
+  }
+
+  /** Fetch and index this thread's artifact metadata by identifier. Best-effort:
+   *  an unavailable list leaves us with an empty map and identifier-only fetches. */
+  private async artifactMetadata(
+    session: McpSession,
+    threadId: string,
+  ): Promise<Map<string, ArtifactMetadata>> {
+    const byIdentifier = new Map<string, ArtifactMetadata>();
+    try {
+      const result = await session.callTool(TOOL_LIST_ARTIFACTS, { thread_id: threadId });
+      const raw = result.structured as { artifacts?: unknown } | unknown[] | undefined;
+      const list = Array.isArray(raw) ? raw : Array.isArray(raw?.artifacts) ? raw.artifacts : [];
+      for (const entry of list) {
+        const parsed = ArtifactMetadataSchema.safeParse(entry);
+        if (parsed.success && parsed.data.identifier) {
+          byIdentifier.set(parsed.data.identifier, parsed.data);
+        }
+      }
+    } catch (err) {
+      this.log.warn("artifact metadata list failed", { err });
+    }
+    return byIdentifier;
+  }
+
+  /** Normalize a fetched artifact into WhatsApp-sendable bytes, or a failure
+   *  reason: `too_large` past the cap, `unavailable` when empty or unrecoverable. */
+  private decodeArtifact(
+    ref: ArtifactRef,
+    meta: ArtifactMetadata | undefined,
+    structured: unknown,
+    text: string,
+    maxBytes: number,
+  ): { artifact: ResolvedArtifact } | { reason: ArtifactFailureReason } {
+    const parsed = ArtifactPayloadSchema.safeParse(structured ?? {});
+    const payload = parsed.success ? parsed.data : {};
+    const type = ref.type ?? payload.artifact_type ?? payload.type ?? meta?.artifact_type ?? meta?.type ?? null;
+    const title = payload.title ?? meta?.title ?? ref.identifier;
+
+    let bytes: Buffer | null = null;
+    let mime: string | null = payload.mime_type ?? null;
+    const b64 = payload.content_base64 ?? payload.data_base64;
+    if (b64 && /^[A-Za-z0-9+/]+={0,2}$/.test(b64) && b64.length % 4 === 0) {
+      bytes = Buffer.from(b64, "base64");
+    } else {
+      // Text/tabular/JSON artifacts: prefer an explicit text field, then a
+      // structured `data` object, then the tool's plain-text content.
+      const body = typeof payload.text === "string" ? payload.text
+        : payload.data !== undefined ? stringifyData(payload.data)
+        : text;
+      if (body && body.trim() !== "") {
+        bytes = Buffer.from(body, "utf8");
+        mime ??= mimeForType(type) ?? null;
+      }
+    }
+    if (!bytes || bytes.length === 0) return { reason: "unavailable" };
+    if (bytes.length > maxBytes) {
+      this.log.warn("artifact exceeds size cap", {
+        identifier: maskArtifact(ref.identifier), sizeBytes: bytes.length, maxBytes,
+      });
+      return { reason: "too_large" };
+    }
+    const resolvedMime = mime ?? mimeForType(type) ?? "application/octet-stream";
+    return {
+      artifact: {
+        identifier: ref.identifier,
+        title,
+        fileName: payload.file_name ?? artifactFileName(ref.identifier, type, resolvedMime),
+        mimeType: resolvedMime,
+        bytes,
+      },
+    };
+  }
+
   /** Auto-decline every pending approval (gateway policy). */
   private async declineAll(
     session: McpSession,
@@ -278,4 +501,64 @@ export class PromptQlAdapter {
       }
     }
   }
+}
+
+// Artifact identifiers can echo user content, so mask them in logs like a jid.
+function maskArtifact(identifier: string): string {
+  if (identifier.length <= 6) return "***";
+  return `${identifier.slice(0, 3)}***${identifier.slice(-2)}`;
+}
+
+/** Serialize a structured artifact `data` payload to text (pretty JSON), falling
+ *  back to a plain string for primitives. */
+function stringifyData(data: unknown): string {
+  if (typeof data === "string") return data;
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+// Map a PromptQL artifact type to a sensible document MIME. Unknown types get a
+// text default (most non-binary artifacts are text/tabular/JSON).
+const TYPE_MIME: Record<string, string> = {
+  text: "text/plain",
+  markdown: "text/markdown",
+  md: "text/markdown",
+  table: "text/csv",
+  csv: "text/csv",
+  json: "application/json",
+  html: "text/html",
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  pdf: "application/pdf",
+};
+
+function mimeForType(type: string | null): string | undefined {
+  if (!type) return undefined;
+  return TYPE_MIME[type.toLowerCase()];
+}
+
+const MIME_EXT: Record<string, string> = {
+  "text/plain": ".txt",
+  "text/markdown": ".md",
+  "text/csv": ".csv",
+  "application/json": ".json",
+  "text/html": ".html",
+  "image/svg+xml": ".svg",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "application/pdf": ".pdf",
+};
+
+/** Build a safe WhatsApp document name from the artifact identifier + MIME.
+ *  Mirrors mediaFileName: strip anything that isn't filename-safe. */
+function artifactFileName(identifier: string, type: string | null, mime: string): string {
+  const safeId = identifier.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "artifact";
+  const base = safeId.startsWith("artifact") ? safeId : `artifact-${safeId}`;
+  const ext = MIME_EXT[mime.split(";")[0]!.trim()] ?? (type ? `.${type.toLowerCase().replace(/[^a-z0-9]/g, "")}`.slice(0, 8) : "");
+  return base.endsWith(ext) || ext === "." ? base : `${base}${ext}`;
 }

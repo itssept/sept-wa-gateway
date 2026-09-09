@@ -60,6 +60,20 @@ are covered by mocked boundary tests, not a live shopper-token test.
   `waiting_approval` and notify the shopper. Never auto-approve.
 - `force_skip` is a context-only post: **never wait for a response**, create a
   response workflow, or send a WhatsApp reply for it.
+- Artifacts: only a **completed** response can carry artifacts. Relay ONLY the
+  artifacts it references inline (`<artifact identifier="..."/>`), fetched via
+  `list_promptql_thread_artifact_metadata` then `get_promptql_artifact`, matched
+  by `artifact_id`/exact identifier — **never the display title**. Strip the tags
+  from the text. Resolve artifacts BEFORE sending so text + files go out
+  together: the reply text is the **caption on the first document**, extra
+  artifacts follow as their own documents through `sendDocument` (the anti-ban
+  queue). Record every document as a gateway echo. Bytes are transient (cap
+  `PROMPTQL_MAX_ARTIFACT_BYTES`), released after each send, never persisted. Best-
+  effort: a failed/oversized artifact is skipped, logged, and noted to the user
+  in brackets appended to the reply (e.g. `(Attachment too large to send)`);
+  it never fails the reply. The first send is the reply that satisfies the
+  inbound claim — its failure marks the outbound record failed; follow-up
+  document failures do not. Never scan a declined-approval notice for artifacts.
 - Product concept: **bot**. Keep legacy `thread_id` on the wire and in storage.
 - **`src/promptql/promptqlAdapter.ts` is the only place that shapes MCP args.**
   `agent_response`, `system_instruction`, and `project_name` belong there.

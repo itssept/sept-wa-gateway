@@ -123,6 +123,7 @@ rollout.
 | `PROMPTQL_MCP_TIMEOUT_MS` | `30000` | Per-request MCP timeout. |
 | `PROMPTQL_MCP_MAX_RETRIES` | `3` | Bounded transient-retry count. |
 | `PROMPTQL_RESPONSE_MAX_MS` | `180000` | Overall ceiling for the ask → blocking-response flow. |
+| `PROMPTQL_MAX_ARTIFACT_BYTES` | `16777216` | Per-artifact decoded-size cap for artifacts sent to WhatsApp as documents (with the reply text as the first document's caption), max 16 MiB. Larger artifacts are skipped (audited) with a short bracket note in the reply, not truncated. |
 
 ### Never set in env
 

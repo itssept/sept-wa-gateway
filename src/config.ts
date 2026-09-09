@@ -105,6 +105,18 @@ const EnvSchema = z.object({
   // Overall ceiling for the blocking response wait (get_latest_promptql_thread_
   // response long-polls internally; we re-call it on `analyzing` until this).
   PROMPTQL_RESPONSE_MAX_MS: z.coerce.number().int().positive().default(180_000),
+
+  // Per-artifact ceiling for a PromptQL artifact relayed back as a WhatsApp
+  // document. WhatsApp's own document cap is ~100 MiB, but we keep this small so
+  // a single oversized artifact can't dominate a chat or memory. An artifact
+  // above this is skipped (audited), not truncated. Applies to the decoded
+  // bytes, not the base64 wire size.
+  PROMPTQL_MAX_ARTIFACT_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(16 * 1024 * 1024, "PROMPTQL_MAX_ARTIFACT_BYTES must not exceed 16 MiB")
+    .default(16 * 1024 * 1024),
 }).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
   path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
   message: "must be greater than or equal to WHATSAPP_PA_REPLY_DELAY_MIN_MS",
@@ -141,6 +153,8 @@ export interface Config {
     timeoutMs: number;
     maxRetries: number;
     responseMaxMs: number;
+    /** Per-artifact byte ceiling for artifacts relayed to WhatsApp as documents. */
+    maxArtifactBytes: number;
   };
 }
 
@@ -187,6 +201,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       timeoutMs: e.PROMPTQL_MCP_TIMEOUT_MS,
       maxRetries: e.PROMPTQL_MCP_MAX_RETRIES,
       responseMaxMs: e.PROMPTQL_RESPONSE_MAX_MS,
+      maxArtifactBytes: e.PROMPTQL_MAX_ARTIFACT_BYTES,
     },
   };
   return cached;

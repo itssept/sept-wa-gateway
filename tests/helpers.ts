@@ -39,6 +39,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       timeoutMs: 5_000,
       maxRetries: 1,
       responseMaxMs: 5_000,
+      maxArtifactBytes: 16 * 1024 * 1024,
       ...overrides.mcp,
     },
     ...overrides,
