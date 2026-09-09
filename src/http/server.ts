@@ -91,6 +91,7 @@ async function main(): Promise<void> {
       settings: ctx.gatewaySettings, messages: ctx.messages,
       getGroup: (jid) => connection.routingGroup(jid),
       prepareHistory: (row) => connection.prepareHistoryMessage(row),
+      reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),
     },
   );
 

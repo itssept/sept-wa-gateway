@@ -35,6 +35,15 @@ for (const pacingProfile of [undefined, "default"] as const) {
   });
 }
 
+test("reaction sends skip composing presence and the typing delay", async () => {
+  const events: Array<string | number> = [];
+  timers(events);
+  const queue = new AntiBanQueue({ sendRatePerSec: 100, warmupDays: 0 });
+  await queue.enqueue(context(events, { reaction: true, textLength: 0 }), async () => { events.push("react"); });
+  // No "composing"/typing sleep/"paused" — just the send, still after the bucket.
+  expect(events).toEqual(["react"]);
+});
+
 for (const [random, pause] of [[0, 2_000], [0.5, 3_500], [0.999999, 5_000]] as const) {
   test(`PA pause samples ${pause}ms within default bounds`, async () => {
     const events: Array<string | number> = [];

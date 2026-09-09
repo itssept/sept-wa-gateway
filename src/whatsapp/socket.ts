@@ -850,6 +850,48 @@ export class WhatsAppConnection {
       return parsed.key.id;
     });
   }
+
+  /**
+   * React to a message with an emoji (e.g. 👀 to signal "the agent will respond").
+   * Best-effort: goes through the anti-ban queue (token bucket + per-chat
+   * serialization) but skips the typing presence/delay since a reaction is not a
+   * typed message. Never call sock.sendMessage directly — always go through this.
+   *
+   * `target` is the inbound message being reacted to. `participant` is required
+   * for group reactions so WhatsApp can address the original author.
+   */
+  async sendReaction(
+    target: { chatJid: string; messageId: string; fromMe: boolean; senderJid: string; isGroup: boolean },
+    emoji: string,
+  ): Promise<void> {
+    z.object({
+      chatJid: z.string().min(1),
+      messageId: z.string().min(1),
+      emoji: z.string().min(1),
+    }).parse({ chatJid: target.chatJid, messageId: target.messageId, emoji });
+    const sock = this.live.sock;
+    if (!sock || this.live.status !== "linked") {
+      throw new Error(`connection ${this.config.connectionId} is not linked`);
+    }
+    const key = {
+      remoteJid: target.chatJid,
+      id: target.messageId,
+      fromMe: target.fromMe,
+      ...(target.isGroup ? { participant: target.senderJid } : {}),
+    };
+    const ctx: SendContext = {
+      connectionId: this.config.connectionId,
+      chatJid: target.chatJid,
+      textLength: 0,
+      reaction: true,
+      linkedAtMs: this.live.linkedAtMs,
+      setComposing: async () => {},
+      clearComposing: async () => {},
+    };
+    await this.antiBan.enqueue(ctx, async () => {
+      await sock.sendMessage(target.chatJid, { react: { text: emoji, key } });
+    });
+  }
 }
 
 /** Extract plain text from the common WAMessage shapes. */

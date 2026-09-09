@@ -24,7 +24,14 @@ interface RoutingDeps {
   messages: MessageStore;
   getGroup: (groupJid: string) => Promise<RoutingGroup | null>;
   prepareHistory: (row: StoredHistoryMessage) => Promise<InboundMessage | null>;
+  /** Add a WhatsApp reaction to an inbound message. Best-effort; optional so
+   *  tests and non-reacting wirings can omit it. */
+  reactToMessage?: (msg: InboundMessage, emoji: string) => Promise<void>;
 }
+
+/** Shown on a relayed message once the agent is asked to respond (force_respond),
+ *  so users know a reply is coming. */
+const AGENT_ACK_EMOJI = "👀";
 interface Destination {
   owner: Shopper | null;
   ownerId: string | null;
@@ -197,6 +204,14 @@ export class InboundRouter {
     this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
   }
 
+  /** Best-effort 👀 so users see the agent will respond. Never fails the flow. */
+  private ackAgent(msg: InboundMessage): void {
+    if (!this.deps.reactToMessage) return;
+    void this.deps.reactToMessage(msg, AGENT_ACK_EMOJI).catch((err) =>
+      this.log.warn("agent ack reaction failed", { corrId: msg.messageId, chatJid: maskJid(msg.chatJid), err }),
+    );
+  }
+
   private async process(msg: InboundMessage, epoch: number): Promise<void> {
     let claimToken: string | null = null;
     const log = this.log.child({ corrId: msg.messageId, chatJid: maskJid(msg.chatJid) });
@@ -241,6 +256,9 @@ export class InboundRouter {
         return;
       }
       if (responseIdentity.role === "client") return;
+      // Relayed to PromptQL with the agent on: acknowledge on the user's message
+      // so they know a reply is coming, before the (possibly long) response wait.
+      this.ackAgent(msg);
       const workflow = this.workflows.create({
         connectionId: msg.connectionId, chatJid: msg.chatJid,
         shopperId: responseIdentity.shopperId, inboundMessageId: msg.messageId, remoteRef: ask.threadId,

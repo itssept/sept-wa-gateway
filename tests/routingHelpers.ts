@@ -24,6 +24,7 @@ export function setup(newBotId: () => string = () => "shared-bot") {
   }
   const calls: Array<{ identity: PostingIdentity; input: any }> = [];
   const dispatches: any[] = [];
+  const reactions: Array<{ messageId: string; chatJid: string; emoji: string }> = [];
   let askHook: ((identity: PostingIdentity, input: any) => Promise<void>) | undefined;
   let group: RoutingGroup | null = {
     linkedMember: true,
@@ -38,9 +39,10 @@ export function setup(newBotId: () => string = () => "shared-bot") {
     ctx.resolver, adapter as never, ctx.workflows, ctx.chatBots, ctx.outboundLog,
     { dispatch: async (input: unknown) => { dispatches.push(input); } } as never,
     ctx.audit, ctx.log,
-    { settings: ctx.gatewaySettings, messages: ctx.messages, getGroup: async () => group, prepareHistory: async () => null },
+    { settings: ctx.gatewaySettings, messages: ctx.messages, getGroup: async () => group, prepareHistory: async () => null,
+      reactToMessage: async (m, emoji) => { reactions.push({ messageId: m.messageId, chatJid: m.chatJid, emoji }); } },
   );
-  return { ...app, a, b, calls, dispatches, router,
+  return { ...app, a, b, calls, dispatches, reactions, router,
     setAskHook: (hook?: typeof askHook) => { askHook = hook; },
     setGroup: (next: RoutingGroup | null) => { group = next; } };
 }

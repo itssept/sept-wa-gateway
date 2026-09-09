@@ -50,6 +50,30 @@ test("client tag relays as Client then prompts fixed owner's PA, with PA pacing"
   expect(dispatches[0]).toMatchObject({ credentialRole: "pa", shopperId: b.id, pacingProfile: "pa_reply", chatJid: GROUP });
 });
 
+test("shopper tag reacts 👀 on the triggering message once the agent is asked to respond", async () => {
+  const { router, reactions, a } = setup();
+  router.onSelfMembership({ connectionId: "test-conn", groupJid: GROUP, addedByJid: a.phoneE164.slice(1) + "@s.whatsapp.net" }, "add");
+  const triggering = msg({ messageId: "trigger", mentionsSelf: true });
+  await router.handle(triggering);
+  await router.handle(msg({ messageId: "plain", senderPhoneE164: "+14155559999", pushName: "Client" }));
+  expect(reactions).toEqual([{ messageId: "trigger", chatJid: GROUP, emoji: "👀" }]);
+});
+
+test("client tag reacts 👀 on the client message, not the synthetic PA prompt", async () => {
+  const { router, reactions, b } = setup();
+  router.onSelfMembership({ connectionId: "test-conn", groupJid: GROUP, addedByJid: b.phoneE164.slice(1) + "@s.whatsapp.net" }, "add");
+  await router.handle(msg({ messageId: "client-msg", senderPhoneE164: "+14155559999", mentionsSelf: true }));
+  expect(reactions).toEqual([{ messageId: "client-msg", chatJid: GROUP, emoji: "👀" }]);
+});
+
+test("shopper DM reacts 👀; force_skip relays never react", async () => {
+  const { router, reactions, a } = setup();
+  const dmJid = a.phoneE164.slice(1) + "@s.whatsapp.net";
+  await router.handle(msg({ isGroup: false, chatJid: dmJid, messageId: "dm" }));
+  await router.handle(msg({ messageId: "group-plain", senderPhoneE164: "+14155559999", pushName: "Client" }));
+  expect(reactions).toEqual([{ messageId: "dm", chatJid: dmJid, emoji: "👀" }]);
+});
+
 test("non-shopper inviter falls back to earliest enabled registration, not first sender", async () => {
   const { router, ctx, a, b, calls } = setup();
   router.onSelfMembership({ connectionId: "test-conn", groupJid: GROUP, addedByJid: "14155559999@s.whatsapp.net" }, "add");
