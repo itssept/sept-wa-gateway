@@ -50,21 +50,23 @@ function makeArtifactDispatcher(
   opts: {
     message: string;
     status?: "completed" | "declined_approval";
-    resolve: (threadId: string, refs: unknown) => unknown[] | Promise<unknown[]>;
+    resolve: (refs: unknown) => unknown[] | Promise<unknown[]>;
     onSendText?: (text: string) => string;
     onSendDoc?: (doc: any) => string;
   },
 ) {
   const texts: string[] = [];
   const docs: Array<{ fileName: string; mimeType: string; caption?: string; size: number; ref: string }> = [];
-  const resolveCalls: Array<{ threadId: string; refs: unknown }> = [];
+  const resolveCalls: Array<{ responseArtifacts: unknown; refs: unknown }> = [];
   let docSeq = 0;
   const dispatcher = new OutboundDispatcher(
     {
-      waitForResponse: async () => ({ status: opts.status ?? "completed", message: opts.message }),
-      resolveArtifacts: async (_id: unknown, threadId: string, refs: unknown) => {
-        resolveCalls.push({ threadId, refs });
-        return opts.resolve(threadId, refs);
+      waitForResponse: async () => ({
+        status: opts.status ?? "completed", message: opts.message, artifacts: [],
+      }),
+      resolveArtifacts: async (_id: unknown, responseArtifacts: unknown, refs: unknown) => {
+        resolveCalls.push({ responseArtifacts, refs });
+        return opts.resolve(refs);
       },
     } as never,
     ctx.workflows, ctx.outboundLog,
@@ -113,7 +115,7 @@ test("dispatcher sends the stripped text as the caption on the first artifact do
 
   // No standalone text message: the text rides the first document as a caption.
   expect(texts).toEqual([]);
-  expect(resolveCalls).toEqual([{ threadId: "bot", refs: [{ identifier: "sales", type: "table" }] }]);
+  expect(resolveCalls).toEqual([{ responseArtifacts: [], refs: [{ identifier: "sales", type: "table" }] }]);
   expect(docs).toEqual([{
     fileName: "artifact-sales.csv", mimeType: "text/csv",
     caption: "Here is your report.\nThanks!", size: 7, ref: "doc-1",

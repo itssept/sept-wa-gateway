@@ -121,7 +121,7 @@ test("waitForResponse re-polls on analyzing then returns completed message", asy
     { threadId: "t1", threadEventId: "e1" },
     Date.now() + 5_000,
   );
-  expect(res).toEqual({ status: "completed", message: "final answer" });
+  expect(res).toEqual({ status: "completed", message: "final answer", artifacts: [] });
   expect(toolCalls.every((c) => c.name === "get_latest_promptql_thread_response")).toBe(true);
   expect(toolCalls.length).toBe(2);
 });
@@ -377,50 +377,97 @@ test("parseArtifactRefs dedupes, tolerates attribute order, and requires an iden
   expect(text).toBe("A B C D");
 });
 
-test("resolveArtifacts fetches referenced artifacts by metadata id/version as documents", async () => {
+// The response's artifacts[] entries: identifier + artifact_reference{id, version}.
+const respArt = (identifier: string, artifact_id: string, version = 0, extra = {}) =>
+  ({ identifier, artifact_reference: { artifact_id, version }, ...extra });
+
+test("resolveArtifacts downloads by the response's artifact_reference id + version", async () => {
   const { toolCalls } = scriptByTool({
     toolResults: [
-      // list_promptql_thread_artifact_metadata
-      { result: { structuredContent: { artifacts: [
-        { artifact_id: "aid-1", identifier: "sales", title: "Sales", artifact_type: "table", version: 3 },
-      ] } } },
-      // get_promptql_artifact
-      { result: { structuredContent: {
-        artifact_type: "table", data: [{ a: 1 }],
-      } } },
+      // download_promptql_artifact — a table comes back as an embedded
+      // application/json resource block.
+      { result: { content: [
+        { type: "resource", resource: {
+          mimeType: "application/json",
+          text: JSON.stringify([{ a: 1 }], null, 2),
+        } },
+      ] } },
     ],
   });
   const a = new PromptQlAdapter(deps);
   const out = await a.resolveArtifacts(
-    "shopper-1", "t1", [{ identifier: "sales", type: "table" }], 1024 * 1024,
+    "shopper-1",
+    [respArt("sales", "aid-1", 3, { title: "Sales", artifact_type: "table" })],
+    [{ identifier: "sales", type: "table" }],
+    1024 * 1024,
   );
-  expect(toolCalls[0]!.name).toBe("list_promptql_thread_artifact_metadata");
-  expect(toolCalls[0]!.args).toEqual({ thread_id: "t1" });
-  expect(toolCalls[1]!.name).toBe("get_promptql_artifact");
-  // Matched by artifact_id + version from metadata, not the display title.
-  expect(toolCalls[1]!.args).toEqual({ artifact_id: "aid-1", version: 3 });
+  // No metadata-list call — the reference came from the response. Only download.
+  expect(toolCalls).toHaveLength(1);
+  expect(toolCalls[0]!.name).toBe("download_promptql_artifact");
+  expect(toolCalls[0]!.args).toEqual({ artifact_id: "aid-1", version: 3 });
   expect(out).toHaveLength(1);
   expect(out[0]!.ok).toBe(true);
   const art = out[0]!.ok ? out[0]!.artifact : null;
   expect(art!.identifier).toBe("sales");
-  expect(art!.mimeType).toBe("text/csv");
-  expect(art!.fileName).toBe("artifact-sales.csv");
+  // MIME comes from the resource block, not a type guess.
+  expect(art!.mimeType).toBe("application/json");
   expect(art!.bytes.toString("utf8")).toBe(JSON.stringify([{ a: 1 }], null, 2));
 });
 
-test("resolveArtifacts falls back to identifier when metadata is unavailable", async () => {
+test("resolveArtifacts sends version 0 (zero-based) and unwraps a plain text block", async () => {
   const { toolCalls } = scriptByTool({
     toolResults: [
-      { result: { isError: true, content: [{ type: "text", text: "no metadata" }] } },
-      { result: { structuredContent: { content_base64: "AAH+/w==", mime_type: "application/pdf" } } },
+      // download returns a plain text block — the raw body, not a JSON envelope.
+      { result: { content: [{ type: "text", text: "Hello World" }] } },
     ],
   });
   const a = new PromptQlAdapter(deps);
   const out = await a.resolveArtifacts(
-    "shopper-1", "t1", [{ identifier: "doc-9", type: null }], 1024 * 1024,
+    "shopper-1",
+    [respArt("hello-world-text", "b72000a7-0000-4000-8000-0000000000a7", 0, { title: "Hello World" })],
+    [{ identifier: "hello-world-text", type: "text" }],
+    1024 * 1024,
   );
-  expect(toolCalls[1]!.args).toEqual({ artifact_id: "doc-9" });
-  expect(out).toHaveLength(1);
+  // version 0 must be sent, not dropped.
+  expect(toolCalls[0]!.name).toBe("download_promptql_artifact");
+  expect(toolCalls[0]!.args).toEqual({ artifact_id: "b72000a7-0000-4000-8000-0000000000a7", version: 0 });
+  expect(out[0]!.ok).toBe(true);
+  const art = out[0]!.ok ? out[0]!.artifact : null;
+  expect(art!.bytes.toString("utf8")).toBe("Hello World");
+});
+
+test("resolveArtifacts fails cleanly when a tag references an artifact not in the response", async () => {
+  // The tag identifier has no matching response artifact => no real id to send.
+  // Must skip the download and report unavailable, never guess an id.
+  const { toolCalls } = scriptByTool({ toolResults: [] });
+  const a = new PromptQlAdapter(deps);
+  const out = await a.resolveArtifacts(
+    "shopper-1",
+    [respArt("something-else", "aid-x")],
+    [{ identifier: "doc-9", type: null }],
+    1024 * 1024,
+  );
+  expect(toolCalls).toHaveLength(0);
+  expect(out).toEqual([{ ok: false, identifier: "doc-9", reason: "unavailable" }]);
+});
+
+test("resolveArtifacts unwraps a binary blob resource block", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [
+      { result: { content: [
+        { type: "resource", resource: { blob: "AAH+/w==", mimeType: "application/pdf" } },
+      ] } },
+    ],
+  });
+  const a = new PromptQlAdapter(deps);
+  const out = await a.resolveArtifacts(
+    "shopper-1",
+    [respArt("report", "29ab00e7-0000-4000-8000-000000000abc")],
+    [{ identifier: "report", type: null }],
+    1024 * 1024,
+  );
+  expect(toolCalls[0]!.args).toEqual({ artifact_id: "29ab00e7-0000-4000-8000-000000000abc", version: 0 });
+  expect(out[0]!.ok).toBe(true);
   const art = out[0]!.ok ? out[0]!.artifact : null;
   expect(art!.mimeType).toBe("application/pdf");
   expect([...art!.bytes]).toEqual([0, 1, 254, 255]);
@@ -429,18 +476,18 @@ test("resolveArtifacts falls back to identifier when metadata is unavailable", a
 test("resolveArtifacts reports too_large / unavailable failures in referenced order", async () => {
   const { toolCalls } = scriptByTool({
     toolResults: [
-      { result: { structuredContent: { artifacts: [] } } },
       // big — exceeds the 8-byte cap below
-      { result: { structuredContent: { text: "way too large for the cap" } } },
+      { result: { content: [{ type: "text", text: "way too large for the cap" }] } },
       // fetch error for the second ref
       { result: { isError: true, content: [{ type: "text", text: "boom" }] } },
       // small — fits
-      { result: { structuredContent: { type: "text", text: "ok" } } },
+      { result: { content: [{ type: "text", text: "ok" }] } },
     ],
   });
   const a = new PromptQlAdapter(deps);
   const out = await a.resolveArtifacts(
-    "shopper-1", "t1",
+    "shopper-1",
+    [respArt("big", "id-big"), respArt("err", "id-err"), respArt("small", "id-small")],
     [{ identifier: "big", type: "text" }, { identifier: "err", type: null }, { identifier: "small", type: "text" }],
     8,
   );
@@ -450,13 +497,13 @@ test("resolveArtifacts reports too_large / unavailable failures in referenced or
   expect(out[1]).toEqual({ ok: false, identifier: "err", reason: "unavailable" });
   expect(out[2]!.ok).toBe(true);
   expect((out[2] as any).artifact.bytes.toString("utf8")).toBe("ok");
-  // 1 list + 3 fetches attempted.
-  expect(toolCalls).toHaveLength(4);
+  // 3 downloads, no metadata list.
+  expect(toolCalls).toHaveLength(3);
 });
 
 test("resolveArtifacts returns nothing for no references and makes no calls", async () => {
   const { toolCalls } = scriptByTool({ toolResults: [] });
   const a = new PromptQlAdapter(deps);
-  expect(await a.resolveArtifacts("shopper-1", "t1", [], 1024)).toEqual([]);
+  expect(await a.resolveArtifacts("shopper-1", [], [], 1024)).toEqual([]);
   expect(toolCalls).toHaveLength(0);
 });

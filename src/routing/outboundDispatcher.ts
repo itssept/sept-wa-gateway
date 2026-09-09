@@ -20,6 +20,7 @@ import { isGroupJid } from "../util.ts";
 import {
   parseArtifactRefs,
   type PromptQlAdapter, type ArtifactOutcome, type ArtifactFailureReason,
+  type ResponseArtifact,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
@@ -61,6 +62,7 @@ export class OutboundDispatcher {
     // Only a completed response can carry artifacts. A declined-approval notice
     // is our own boilerplate, so never scan it for <artifact> tags.
     let completed = false;
+    let responseArtifacts: ResponseArtifact[] = [];
     try {
       const res = await this.adapter.waitForResponse(
         { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" },
@@ -74,6 +76,7 @@ export class OutboundDispatcher {
       // completed or declined_approval both produce a message to send back.
       answer = res.message;
       completed = res.status === "completed";
+      if (res.status === "completed") responseArtifacts = res.artifacts;
     } catch (err) {
       this.fail(input, `PromptQL error: ${String(err)}`);
       return;
@@ -101,7 +104,7 @@ export class OutboundDispatcher {
       try {
         outcomes = await this.adapter.resolveArtifacts(
           { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" },
-          input.threadId,
+          responseArtifacts,
           refs,
           this.config.mcp.maxArtifactBytes,
         );

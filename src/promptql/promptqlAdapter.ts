@@ -26,8 +26,10 @@ import { McpSession, McpError } from "./mcpClient.ts";
 const TOOL_ASK = "ask_promptql";
 const TOOL_WAIT = "get_latest_promptql_thread_response";
 const TOOL_RESPOND_APPROVAL = "respond_to_promptql_approval";
-const TOOL_LIST_ARTIFACTS = "list_promptql_thread_artifact_metadata";
-const TOOL_GET_ARTIFACT = "get_promptql_artifact";
+// download_promptql_artifact is the ONLY tool that returns artifact CONTENT.
+// get_promptql_artifact / list_..._metadata return metadata only (verified live:
+// get_promptql_artifact relayed a metadata JSON dump, not the bytes).
+const TOOL_DOWNLOAD_ARTIFACT = "download_promptql_artifact";
 
 export interface AskResult {
   threadId: string;
@@ -94,6 +96,32 @@ export interface ArtifactRef {
   type: string | null;
 }
 
+// One entry of the completed response's `artifacts[]`. Verified live: it carries
+// the inline `identifier`, plus an `artifact_reference` with the real UUID
+// `artifact_id` and a zero-based integer `version` — everything needed to
+// download the content directly, no metadata-list call or slug matching.
+const ResponseArtifactSchema = z.object({
+  identifier: z.string().min(1),
+  title: z.string().nullish(),
+  artifact_type: z.string().nullish(),
+  artifact_reference: z.object({
+    artifact_id: z.string().min(1),
+    version: z.number().int().nonnegative().nullish(),
+  }),
+}).passthrough();
+export type ResponseArtifact = z.infer<typeof ResponseArtifactSchema>;
+
+/** Parse the completed response's `artifacts[]`; unrecognised entries are dropped. */
+function parseResponseArtifacts(raw: unknown): ResponseArtifact[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ResponseArtifact[] = [];
+  for (const entry of raw) {
+    const parsed = ResponseArtifactSchema.safeParse(entry);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out;
+}
+
 // A self-closing tag the bot embeds in its final text, e.g.
 //   <artifact type="text" identifier="simple-text" />
 // Attribute order is not guaranteed, so match identifier and type independently
@@ -135,35 +163,66 @@ export function parseArtifactRefs(text: string): { text: string; refs: ArtifactR
   return { text: stripped, refs };
 }
 
-// Artifact metadata as returned by list_promptql_thread_artifact_metadata. The
-// exact wire shape can vary across PromptQL releases, so match by artifact_id or
-// identifier and treat everything else as optional/best-effort.
-const ArtifactMetadataSchema = z.object({
-  artifact_id: z.string().min(1).optional(),
-  identifier: z.string().min(1).optional(),
-  title: z.string().optional(),
-  artifact_type: z.string().optional(),
-  type: z.string().optional(),
-  version: z.union([z.string(), z.number()]).optional(),
-}).passthrough();
-type ArtifactMetadata = z.infer<typeof ArtifactMetadataSchema>;
 
-// A fetched artifact from get_promptql_artifact. PromptQL may return the payload
-// as base64 (binary) OR as a text/data field (text, tables, json). We accept
-// both and normalize to bytes downstream.
-const ArtifactPayloadSchema = z.object({
-  artifact_id: z.string().optional(),
-  identifier: z.string().optional(),
-  title: z.string().optional(),
-  artifact_type: z.string().optional(),
-  type: z.string().optional(),
-  mime_type: z.string().optional(),
-  file_name: z.string().optional(),
-  content_base64: z.string().optional(),
-  data_base64: z.string().optional(),
+// download_promptql_artifact returns standard MCP content blocks. The block that
+// carries the artifact bytes varies by type:
+//   - text            -> { type:"text", text }
+//   - image / audio   -> { type:"image"|"audio", data:<base64>, mimeType }
+//   - html/table/viz/
+//     file / binary   -> { type:"resource", resource:{ text | blob:<base64>, mimeType, uri } }
+// We take the FIRST block that yields bytes. `uri` is an artifact:// resource id,
+// not content, so it is ignored for the payload.
+const McpResourceSchema = z.object({
   text: z.string().optional(),
-  data: z.unknown().optional(),
+  blob: z.string().optional(),
+  mimeType: z.string().optional(),
+  uri: z.string().optional(),
 }).passthrough();
+const McpContentBlockSchema = z.object({
+  type: z.string().optional(),
+  text: z.string().optional(),
+  data: z.string().optional(),
+  mimeType: z.string().optional(),
+  resource: McpResourceSchema.optional(),
+}).passthrough();
+const McpResultSchema = z.object({
+  content: z.array(McpContentBlockSchema).optional(),
+}).passthrough();
+
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function decodeBase64(s: string): Buffer | null {
+  if (!BASE64_RE.test(s) || s.length % 4 !== 0) return null;
+  return Buffer.from(s, "base64");
+}
+
+/** Pull the artifact bytes + mime out of an MCP tool result's content blocks. */
+function bytesFromMcpResult(raw: unknown): { bytes: Buffer; mime: string | null } | null {
+  const parsed = McpResultSchema.safeParse(raw ?? {});
+  if (!parsed.success || !parsed.data.content) return null;
+  for (const block of parsed.data.content) {
+    // Inline binary block (image/audio): base64 in `data`.
+    if (typeof block.data === "string") {
+      const bytes = decodeBase64(block.data);
+      if (bytes?.length) return { bytes, mime: block.mimeType ?? null };
+    }
+    // Embedded resource: bytes in `resource.blob` (base64) or `resource.text`.
+    const res = block.resource;
+    if (res) {
+      if (typeof res.blob === "string") {
+        const bytes = decodeBase64(res.blob);
+        if (bytes?.length) return { bytes, mime: res.mimeType ?? null };
+      }
+      if (typeof res.text === "string" && res.text !== "") {
+        return { bytes: Buffer.from(res.text, "utf8"), mime: res.mimeType ?? null };
+      }
+    }
+    // Plain text block.
+    if (block.type === "text" && typeof block.text === "string" && block.text !== "") {
+      return { bytes: Buffer.from(block.text, "utf8"), mime: block.mimeType ?? null };
+    }
+  }
+  return null;
+}
 
 const AskStatusSchema = z.enum([
   "success", "upload_failed", "system_trigger_failed",
@@ -199,7 +258,7 @@ const AskResponseSchema = z.object({
 });
 
 export type BotResponse =
-  | { status: "completed"; message: string }
+  | { status: "completed"; message: string; artifacts: ResponseArtifact[] }
   | { status: "declined_approval"; message: string }
   | { status: "failed"; message: string };
 
@@ -339,12 +398,13 @@ export class PromptQlAdapter {
         status?: string;
         message?: string;
         approvals?: Array<{ approval_id?: string; message?: string; description?: string }>;
+        artifacts?: unknown;
       };
       const status = sc.status ?? "";
       const message = sc.message ?? result.text ?? "";
 
       if (status === "completed" || status === "success") {
-        return { status: "completed", message };
+        return { status: "completed", message, artifacts: parseResponseArtifacts(sc.artifacts) };
       }
       if (status === "waiting_approval") {
         await this.declineAll(session, sc.approvals ?? []);
@@ -364,38 +424,55 @@ export class PromptQlAdapter {
   }
 
   /**
-   * Resolve the artifacts a completed response referenced inline. For each
-   * `<artifact identifier="..."/>` tag, look up its metadata (for id/version/
-   * title), fetch the artifact, and return it as ready-to-send bytes.
+   * Resolve the artifacts a completed response referenced inline, using the
+   * response's own `artifacts[]` (verified live to carry the exact inline
+   * `identifier` plus an `artifact_reference` with the real UUID + zero-based
+   * integer version). For each inline `<artifact identifier="..."/>` tag we match
+   * the response artifact by identifier and download its content directly — no
+   * metadata-list call, no slug guessing.
    *
    * Returns one outcome per reference, IN THE REFERENCED ORDER: either sendable
-   * bytes or a reason (too_large / unavailable) the caller can surface as a
-   * short note. Resolution never throws for a single artifact — one bad artifact
-   * cannot fail the reply.
+   * bytes or a reason (too_large / unavailable). Resolution never throws for a
+   * single artifact — one bad artifact cannot fail the reply.
    *
    * `maxBytes` caps each artifact's decoded size; anything larger is `too_large`.
    * Bytes are transient — the caller sends them and must not persist them.
    */
   async resolveArtifacts(
     shopperId: IdentityInput,
-    threadId: string,
+    responseArtifacts: ResponseArtifact[],
     refs: ArtifactRef[],
     maxBytes: number,
   ): Promise<ArtifactOutcome[]> {
     if (refs.length === 0) return [];
     const session = this.session(shopperId);
-    const metaByIdentifier = await this.artifactMetadata(session, threadId);
+    // Exact identifier match — both the inline tag and the response artifact use
+    // the same identifier string. Last write wins is irrelevant (identifiers are
+    // unique per response); index for O(1) lookup preserving reference order.
+    const byIdentifier = new Map<string, ResponseArtifact>();
+    for (const a of responseArtifacts) byIdentifier.set(a.identifier, a);
+
     const outcomes: ArtifactOutcome[] = [];
     for (const ref of refs) {
       try {
-        const meta = metaByIdentifier.get(ref.identifier);
-        // Match by artifact_id or exact identifier — never by display title.
-        const artifactId = meta?.artifact_id ?? ref.identifier;
-        const version = meta?.version;
-        const args: Record<string, unknown> = { artifact_id: artifactId };
-        if (version !== undefined) args.version = version;
-        const result = await session.callTool(TOOL_GET_ARTIFACT, args);
-        const decoded = this.decodeArtifact(ref, meta, result.structured, result.text, maxBytes);
+        const art = byIdentifier.get(ref.identifier);
+        if (!art) {
+          // The tag referenced an artifact the response did not list — we have no
+          // real id to download. Fail cleanly rather than guess.
+          this.log.warn("artifact unresolved (not in response artifacts)", {
+            identifier: maskArtifact(ref.identifier),
+          });
+          outcomes.push({ ok: false, identifier: ref.identifier, reason: "unavailable" });
+          continue;
+        }
+        // download_promptql_artifact is the content tool. Version is a zero-based
+        // integer; send it as-is (0 is valid and must not be dropped).
+        const args: Record<string, unknown> = { artifact_id: art.artifact_reference.artifact_id };
+        if (typeof art.artifact_reference.version === "number") {
+          args.version = art.artifact_reference.version;
+        }
+        const result = await session.callTool(TOOL_DOWNLOAD_ARTIFACT, args);
+        const decoded = this.decodeArtifact(ref, art, result.raw, maxBytes);
         if ("artifact" in decoded) {
           outcomes.push({ ok: true, artifact: decoded.artifact });
         } else {
@@ -412,72 +489,35 @@ export class PromptQlAdapter {
     return outcomes;
   }
 
-  /** Fetch and index this thread's artifact metadata by identifier. Best-effort:
-   *  an unavailable list leaves us with an empty map and identifier-only fetches. */
-  private async artifactMetadata(
-    session: McpSession,
-    threadId: string,
-  ): Promise<Map<string, ArtifactMetadata>> {
-    const byIdentifier = new Map<string, ArtifactMetadata>();
-    try {
-      const result = await session.callTool(TOOL_LIST_ARTIFACTS, { thread_id: threadId });
-      const raw = result.structured as { artifacts?: unknown } | unknown[] | undefined;
-      const list = Array.isArray(raw) ? raw : Array.isArray(raw?.artifacts) ? raw.artifacts : [];
-      for (const entry of list) {
-        const parsed = ArtifactMetadataSchema.safeParse(entry);
-        if (parsed.success && parsed.data.identifier) {
-          byIdentifier.set(parsed.data.identifier, parsed.data);
-        }
-      }
-    } catch (err) {
-      this.log.warn("artifact metadata list failed", { err });
-    }
-    return byIdentifier;
-  }
-
-  /** Normalize a fetched artifact into WhatsApp-sendable bytes, or a failure
-   *  reason: `too_large` past the cap, `unavailable` when empty or unrecoverable. */
+  /** Normalize a downloaded artifact into WhatsApp-sendable bytes, or a failure
+   *  reason: `too_large` past the cap, `unavailable` when empty or unrecoverable.
+   *  `raw` is the download_promptql_artifact MCP result (typed content blocks);
+   *  `meta` supplies title/type from the metadata listing. */
   private decodeArtifact(
     ref: ArtifactRef,
-    meta: ArtifactMetadata | undefined,
-    structured: unknown,
-    text: string,
+    art: ResponseArtifact,
+    raw: unknown,
     maxBytes: number,
   ): { artifact: ResolvedArtifact } | { reason: ArtifactFailureReason } {
-    const parsed = ArtifactPayloadSchema.safeParse(structured ?? {});
-    const payload = parsed.success ? parsed.data : {};
-    const type = ref.type ?? payload.artifact_type ?? payload.type ?? meta?.artifact_type ?? meta?.type ?? null;
-    const title = payload.title ?? meta?.title ?? ref.identifier;
+    const type = ref.type ?? art.artifact_type ?? null;
+    const title = art.title ?? ref.identifier;
 
-    let bytes: Buffer | null = null;
-    let mime: string | null = payload.mime_type ?? null;
-    const b64 = payload.content_base64 ?? payload.data_base64;
-    if (b64 && /^[A-Za-z0-9+/]+={0,2}$/.test(b64) && b64.length % 4 === 0) {
-      bytes = Buffer.from(b64, "base64");
-    } else {
-      // Text/tabular/JSON artifacts: prefer an explicit text field, then a
-      // structured `data` object, then the tool's plain-text content.
-      const body = typeof payload.text === "string" ? payload.text
-        : payload.data !== undefined ? stringifyData(payload.data)
-        : text;
-      if (body && body.trim() !== "") {
-        bytes = Buffer.from(body, "utf8");
-        mime ??= mimeForType(type) ?? null;
-      }
-    }
-    if (!bytes || bytes.length === 0) return { reason: "unavailable" };
+    // Pull raw bytes out of the MCP content blocks — never the JSON envelope.
+    const extracted = bytesFromMcpResult(raw);
+    if (!extracted || extracted.bytes.length === 0) return { reason: "unavailable" };
+    const bytes = extracted.bytes;
     if (bytes.length > maxBytes) {
       this.log.warn("artifact exceeds size cap", {
         identifier: maskArtifact(ref.identifier), sizeBytes: bytes.length, maxBytes,
       });
       return { reason: "too_large" };
     }
-    const resolvedMime = mime ?? mimeForType(type) ?? "application/octet-stream";
+    const resolvedMime = extracted.mime ?? mimeForType(type) ?? "application/octet-stream";
     return {
       artifact: {
         identifier: ref.identifier,
         title,
-        fileName: payload.file_name ?? artifactFileName(ref.identifier, type, resolvedMime),
+        fileName: artifactFileName(ref.identifier, type, resolvedMime),
         mimeType: resolvedMime,
         bytes,
       },
@@ -507,17 +547,6 @@ export class PromptQlAdapter {
 function maskArtifact(identifier: string): string {
   if (identifier.length <= 6) return "***";
   return `${identifier.slice(0, 3)}***${identifier.slice(-2)}`;
-}
-
-/** Serialize a structured artifact `data` payload to text (pretty JSON), falling
- *  back to a plain string for primitives. */
-function stringifyData(data: unknown): string {
-  if (typeof data === "string") return data;
-  try {
-    return JSON.stringify(data, null, 2);
-  } catch {
-    return String(data);
-  }
 }
 
 // Map a PromptQL artifact type to a sensible document MIME. Unknown types get a
