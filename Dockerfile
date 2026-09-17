@@ -40,7 +40,7 @@ ENV NODE_ENV=production
 
 # Link the GHCR package to this repo (inherits repo visibility/permissions,
 # shows on the repo's Packages panel).
-LABEL org.opencontainers.image.source="https://github.com/hasura/sept-wa-gateway"
+LABEL org.opencontainers.image.source="https://github.com/itssept/sept-wa-gateway"
 
 # Bundled app + resolved production node_modules only. No src/, no tsconfig.
 COPY --from=deps /app/node_modules ./node_modules

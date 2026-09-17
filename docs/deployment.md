@@ -19,7 +19,7 @@ Images are published by the **Publish image** GitHub Actions workflow
 **Registry / name**
 
 ```
-ghcr.io/hasura/sept-wa-gateway
+ghcr.io/itssept/sept-wa-gateway
 ```
 
 On a manual run you can override the name.
@@ -50,7 +50,7 @@ git push origin v1.2.3
 ```
 
 Watch the run in the Actions tab. When it finishes,
-`ghcr.io/hasura/sept-wa-gateway:1.2.3` and `:latest` are available to pull.
+`ghcr.io/itssept/sept-wa-gateway:1.2.3` and `:latest` are available to pull.
 
 > **Permissions:** the workflow pushes with the built-in `GITHUB_TOKEN`
 > (`packages: write`). No extra secret is needed to publish. Making the GHCR
@@ -137,7 +137,7 @@ rollout.
 
 ## Deployment checklist
 
-1. **Pull the image**: `ghcr.io/hasura/sept-wa-gateway:<tag>` (pin a version tag,
+1. **Pull the image**: `ghcr.io/itssept/sept-wa-gateway:<tag>` (pin a version tag,
    not `latest`, for reproducible deploys).
 2. **Provision secrets** out of band: `GATEWAY_ADMIN_TOKEN`,
    `DATA_ENCRYPTION_KEY` (both `openssl rand -hex 32`).
