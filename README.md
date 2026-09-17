@@ -224,7 +224,7 @@ docker run -d --name sept-wa-gateway -p 8790:8790 \
   -e DATA_ENCRYPTION_KEY=<64 hex> \
   -e GATEWAY_ADMIN_TOKEN=<64 hex> \
   -e 'PROMPTQL_MCP_URL=https://data.prompt.ql.app/promptql/mcp-server/mcp?project-name=<project>' \
-  ghcr.io/hasura/sept-wa-gateway:latest
+  ghcr.io/itssept/sept-wa-gateway:latest
 ```
 
 Two things must be right or the deploy breaks:
@@ -257,7 +257,7 @@ bun run typecheck
 - **[AGENTS.md](AGENTS.md)** — the hard rules (anti-ban contract, PromptQL MCP
   wire contract, open decisions) an agent must not get wrong.
 
-Baileys/session/anti-ban patterns are adapted from `hasura/whatsapp-gateway`
+Baileys/session/anti-ban patterns are adapted from a reference WhatsApp gateway
 (studied as behavior reference, not a dependency). This repo is a fresh
 implementation with a deliberately small scope: one connection, cloud-deployable,
 API-managed.

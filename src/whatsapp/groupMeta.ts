@@ -1,5 +1,5 @@
 /**
- * SQLite group metadata. Ported from the reference `hasura/whatsapp-gateway`.
+ * SQLite group metadata. Ported from a reference WhatsApp gateway.
  *
  * Persists group subject + participants and feeds Baileys' `cachedGroupMetadata`
  * (anti-ban: avoid refetch/re-encrypt per send). Refreshed on `groups.update` /
