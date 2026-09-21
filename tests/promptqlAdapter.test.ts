@@ -207,14 +207,14 @@ test.each([null, "existing-bot"])("force_skip carries downloaded media on bot %s
     bytes, sizeBytes: bytes.length, mime: "application/pdf", fileName: "invoice_0912.pdf",
   }, "fallback.pdf");
   await a.ask("client-sa", {
-    query: "[Client] Priya Sharma, +447700900123\n(document: invoice_0912.pdf)",
+    query: "[Client] Priya Sharma\n[Phone] +447700900123\n[Message] (document: invoice_0912.pdf)",
     threadId, roomName: threadId ? null : "sept-common",
     agentResponse: "force_skip", files: [file],
   });
   expect(toolCalls).toHaveLength(1);
   expect(toolCalls[0]!.name).toBe("ask_promptql");
   expect(toolCalls[0]!.args).toEqual({
-    query: "[Client] Priya Sharma, +447700900123\n(document: invoice_0912.pdf)",
+    query: "[Client] Priya Sharma\n[Phone] +447700900123\n[Message] (document: invoice_0912.pdf)",
     ...(threadId ? { thread_id: threadId } : { room_name: "sept-common" }),
     agent_response: "force_skip",
     files: [{ file_name: "invoice_0912.pdf", mime_type: "application/pdf", content_base64: "AAH+/w==" }],
@@ -258,7 +258,7 @@ test("upload failure preserves the bot handle, does not poll/retry or expose ser
   let error: unknown;
   try {
     await a.ask("client", {
-      query: "[Client] no phone\n(image)", agentResponse: "force_skip",
+      query: "[Client] \n[Phone] \n[Message] (image)", agentResponse: "force_skip",
       files: [{ file_name: "image.jpg", mime_type: "image/jpeg", content_base64: "YWJj" }],
     });
   } catch (err) { error = err; }
@@ -292,7 +292,7 @@ test.each([
   expect(result.status).toBe("ready");
   const a = new PromptQlAdapter(deps);
   await a.ask("client", {
-    query: "[Client] no phone\ncaption", agentResponse: "force_skip",
+    query: "[Client] \n[Phone] \n[Message] caption", agentResponse: "force_skip",
     files: [promptQlFileFromMedia(result.media!, fallbackName)],
   });
   expect(toolCalls).toHaveLength(1);
@@ -308,11 +308,11 @@ test("expired media can still be relayed as envelope text without a file", async
   });
   const a = new PromptQlAdapter(deps);
   await a.ask("client", {
-    query: "[Client] no phone\n(image)", agentResponse: "force_skip", files: [],
+    query: "[Client] \n[Phone] \n[Message] (image)", agentResponse: "force_skip", files: [],
   });
   expect(toolCalls).toHaveLength(1);
   expect(toolCalls[0]!.args.files).toBeUndefined();
-  expect(toolCalls[0]!.args.query).toBe("[Client] no phone\n(image)");
+  expect(toolCalls[0]!.args.query).toBe("[Client] \n[Phone] \n[Message] (image)");
 });
 
 test("shopper, PA, second shopper and Client use isolated sessions; invalidation never crosses roles", async () => {

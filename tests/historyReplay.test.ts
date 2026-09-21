@@ -95,7 +95,7 @@ test("first live arrival waits for all chunks, global oldest-first replay then l
   await app.history([message("older", 100)], { progress: 100, chunkOrder: 1 });
   expect(app.calls.map((c) => c.input.query)).toEqual([
     "Replaying 2 messages from group history, oldest first", "older",
-    "[Client] Priya, 123@lid\nnewer", "End of history", "live",
+    "[Client] Priya\n[ID] 123@lid\n[Message] newer", "End of history", "live",
   ]);
   expect(app.calls.slice(0, 4).every((c) => c.input.agentResponse === "force_skip")).toBe(true);
   expect(app.calls.map((c) => c.identity)).toEqual([
@@ -182,7 +182,7 @@ test("history files use same helper and parser metadata survives expired downloa
     : { status: "ready", media: { bytes: Buffer.from("doc"), fileName: "invoice.pdf", mime: "application/pdf", sizeBytes: 3 } };
   await app.history([doc("expired"), doc("ready")]);
   const posts = app.calls.slice(1, 3);
-  expect(posts.every((c) => c.input.query === "[Client] Priya, 123@lid\n(document: invoice.pdf)")).toBe(true);
+  expect(posts.every((c) => c.input.query === "[Client] Priya\n[ID] 123@lid\n[Message] (document: invoice.pdf)")).toBe(true);
   expect(posts[0]!.input.files).toEqual([{ file_name: "invoice.pdf", mime_type: "application/pdf", content_base64: "ZG9j" }]);
   expect(posts[1]!.input.files).toEqual([]);
   expect(app.dispatches).toHaveLength(0);
