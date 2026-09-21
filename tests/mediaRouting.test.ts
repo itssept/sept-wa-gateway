@@ -16,7 +16,7 @@ test("Client media labels preserve filename, voice note, contact and location wi
     ["contact", false, "contact card"], ["location", false, "location"],
   ] as const) {
     expect(clientQuery(msg({ senderPhoneE164: null, senderJid: "123@lid", pushName: "Priya", msgType: kind, fileName: "invoice.pdf", ptt, text: "", mediaStatus: "expired" })))
-      .toBe(`[Client] Priya, 123@lid\n(${label})`);
+      .toBe(`[Client] Priya\n[ID] 123@lid\n[Message] (${label})`);
   }
 });
 

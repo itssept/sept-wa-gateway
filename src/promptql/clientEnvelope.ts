@@ -24,9 +24,15 @@ export function formatClientEnvelope(input: ClientEnvelopeInput): string {
   // Sender-supplied metadata must not create extra header/body lines.
   const singleLine = (text: string | null | undefined) =>
     text?.replace(/[\r\n\u2028\u2029]/g, " ").trim();
-  const name = singleLine(value.displayName);
-  const identity = value.phoneE164 ?? (singleLine(value.lid) || "no phone");
-  const header = `[Client] ${name ? `${name}, ` : ""}${identity}`;
+  const name = singleLine(value.displayName) ?? "";
+  const lid = singleLine(value.lid);
+  // A LID is an opaque id, never a phone number, so it gets its own label.
+  // When neither is present, leave a blank [Phone] line.
+  const identity = value.phoneE164
+    ? `[Phone] ${value.phoneE164}`
+    : lid
+      ? `[ID] ${lid}`
+      : "[Phone] ";
   let text = value.text;
   if (!text.trim() && value.media) {
     const fileName = singleLine(value.media.fileName);
@@ -34,5 +40,5 @@ export function formatClientEnvelope(input: ClientEnvelopeInput): string {
       ? `(document: ${fileName})`
       : `(${value.media.kind})`;
   }
-  return `${header}\n${text}`;
+  return `[Client] ${name}\n${identity}\n[Message] ${text}`;
 }

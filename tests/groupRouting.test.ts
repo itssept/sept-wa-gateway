@@ -13,7 +13,7 @@ test("qualifying group mirrors its first shopper and client messages, without ac
   expect(calls[0]!.input.query).toBe("hello @14155550000");
   expect(calls[0]!.input.roomName).toBe("alice-room");
   expect(calls[1]!.identity).toEqual({ role: "client" });
-  expect(calls[1]!.input.query).toBe("[Client] Client, +14155559999\nquestion");
+  expect(calls[1]!.input.query).toBe("[Client] Client\n[Phone] +14155559999\n[Message] question");
   expect(calls.every((c) => c.input.agentResponse === "force_skip")).toBe(true);
   expect(dispatches).toHaveLength(0);
   expect(ctx.chatBots.get("test-conn", GROUP)?.shopperId).toBe(a.id);
