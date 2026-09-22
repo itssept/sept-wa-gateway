@@ -48,6 +48,7 @@ function setup(wait = 1000) {
     settings: ctx.gatewaySettings, messages: ctx.messages,
     getGroup: (jid) => conn.routingGroup(jid),
     prepareHistory: (row) => conn.prepareHistoryMessage(row),
+    relayUnregisteredChats: true,
   });
   apps.push({ db: app.db, conn });
   const membership = (action: "add" | "remove") => (conn as any).onParticipantUpdate({

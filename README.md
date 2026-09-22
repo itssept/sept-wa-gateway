@@ -88,7 +88,7 @@ registered shopper. Mirroring starts with the first message, without a tag.
 | Shopper in qualifying group | That shopper | Only when tagging the linked number |
 | Client in qualifying group | Client | Relay only |
 | Client tag in qualifying group | Client relay, then owner's PA prompt | PA reply to group |
-| Client DM or any message in unqualified group | Client, common room | Never |
+| Client DM or any message in unqualified group | Client, common room (only if `RELAY_UNREGISTERED_CHATS=true`; otherwise dropped) | Never |
 | Linked phone's manual message | Fixed owner's shopper identity, or Client for common-room chats | Never |
 | Gateway's own reply | Not posted again | None |
 
@@ -106,6 +106,14 @@ relayed messages are not copied. Pending pre-registration text is recovered
 on the old bot before switching; failed recovery blocks the switch. History
 can also initiate this transition, without triggering a response.
 Already shopper-owned bots keep their original owner and room.
+
+Chats with no owning shopper (unregistered DM sender, unqualified group) relay
+to the common room only when `RELAY_UNREGISTERED_CHATS=true`. The default is
+`false`: they are dropped and audited (`inbound.rejected`,
+reason `unregistered_chat_relay_disabled`), never relayed, until an enabled
+registered shopper qualifies the chat. This gate does not affect shopper-owned
+or qualifying chats, and a disabled chat still promotes normally once it
+qualifies.
 
 Client tags first relay with `force_skip`, then the owner's PA posts:
 `Please respond to the client message above on behalf of [shopper name].`
