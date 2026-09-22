@@ -32,6 +32,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     messageRetentionDays: 90,
     captureGroupHistory: true,
     historyJoinWaitMs: 0,
+    relayUnregisteredChats: false,
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

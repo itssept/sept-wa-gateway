@@ -87,6 +87,12 @@ are covered by mocked boundary tests, not a live shopper-token test.
 - Client DM/unqualified group: Client SA in the common public room, always
   `force_skip`. In qualifying groups Client posts also use `force_skip`.
   Missing Client token or common room means audit/log and drop, never crash.
+- Ownerless chats (unregistered DM sender, unqualified group; `ownerId === null`
+  in `destination()`) relay to the common room only when
+  `RELAY_UNREGISTERED_CHATS=true`. Default false: drop and audit
+  (`inbound.rejected`, reason `unregistered_chat_relay_disabled`), never crash.
+  The gate never touches shopper-owned or qualifying chats, and a dropped chat
+  still promotes normally on the next message once it qualifies.
 - A client tag in a qualifying group produces two posts: Client relay, then
   fixed owner's PA prompt with `force_respond`. `paPrompt()` owns the exact
   wording. Reply through the dispatcher with `pacingProfile: "pa_reply"`;

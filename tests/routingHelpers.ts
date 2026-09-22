@@ -12,7 +12,10 @@ export function msg(overrides: Partial<InboundMessage> = {}): InboundMessage {
     fromMe: false, mentionsSelf: false, ...overrides,
   };
 }
-export function setup(newBotId: () => string = () => "shared-bot") {
+export function setup(
+  newBotId: () => string = () => "shared-bot",
+  opts: { relayUnregisteredChats?: boolean } = {},
+) {
   const app = makeTestApp();
   const { ctx } = app;
   ctx.gatewaySettings.set("client-token", "common-room");
@@ -40,7 +43,8 @@ export function setup(newBotId: () => string = () => "shared-bot") {
     { dispatch: async (input: unknown) => { dispatches.push(input); } } as never,
     ctx.audit, ctx.log,
     { settings: ctx.gatewaySettings, messages: ctx.messages, getGroup: async () => group, prepareHistory: async () => null,
-      reactToMessage: async (m, emoji) => { reactions.push({ messageId: m.messageId, chatJid: m.chatJid, emoji }); } },
+      reactToMessage: async (m, emoji) => { reactions.push({ messageId: m.messageId, chatJid: m.chatJid, emoji }); },
+      relayUnregisteredChats: opts.relayUnregisteredChats ?? true },
   );
   return { ...app, a, b, calls, dispatches, reactions, router,
     setAskHook: (hook?: typeof askHook) => { askHook = hook; },

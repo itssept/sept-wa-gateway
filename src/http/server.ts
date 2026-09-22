@@ -92,6 +92,7 @@ async function main(): Promise<void> {
       getGroup: (jid) => connection.routingGroup(jid),
       prepareHistory: (row) => connection.prepareHistoryMessage(row),
       reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),
+      relayUnregisteredChats: config.relayUnregisteredChats,
     },
   );
 

@@ -3,6 +3,7 @@ import { AskSubmissionError } from "../src/promptql/promptqlAdapter.ts";
 import { setup as makeSetup, msg, GROUP } from "./routingHelpers.ts";
 const apps: ReturnType<typeof makeSetup>[] = [];
 function setup() { const app = makeSetup(); apps.push(app); return app; }
+function setupRelayOff() { const app = makeSetup(() => "shared-bot", { relayUnregisteredChats: false }); apps.push(app); return app; }
 afterEach(() => { for (const app of apps.splice(0)) app.db.close(); });
 
 test("qualifying group mirrors its first shopper and client messages, without activation", async () => {
@@ -92,6 +93,31 @@ test("unqualified groups route every sender as Client in common room and never t
   expect(calls[0]!.input.roomName).toBe("common-room");
   expect(ctx.chatBots.get("test-conn", GROUP)?.shopperId).toBeNull();
   expect(dispatches).toHaveLength(0);
+});
+
+test("relay off: unqualified group is dropped (audited), no relay, no bot", async () => {
+  const { router, calls, dispatches, ctx, setGroup } = setupRelayOff();
+  setGroup({ linkedMember: true, participants: [] });
+  await router.handle(msg({ mentionsSelf: true }));
+  await router.handle(msg({ fromMe: true, mentionsSelf: true }));
+  expect(calls).toHaveLength(0);
+  expect(dispatches).toHaveLength(0);
+  expect(ctx.chatBots.get("test-conn", GROUP)).toBeNull();
+  expect(ctx.audit.recent().some((e) => e.action === "inbound.rejected"
+    && (e.detail as { reason?: string }).reason === "unregistered_chat_relay_disabled")).toBe(true);
+});
+
+test("relay off: unregistered DM sender is dropped; a registered shopper DM still relays", async () => {
+  const { router, calls, a, dispatches, ctx } = setupRelayOff();
+  await router.handle(msg({ isGroup: false, chatJid: "14155559999@s.whatsapp.net", senderPhoneE164: "+14155559999", mentionsSelf: true }));
+  expect(calls).toHaveLength(0);
+  expect(ctx.chatBots.get("test-conn", "14155559999@s.whatsapp.net")).toBeNull();
+  // A registered shopper still resolves an owner, so it is never "unregistered".
+  const dm = { isGroup: false, chatJid: a.phoneE164.slice(1) + "@s.whatsapp.net" };
+  await router.handle(msg(dm));
+  expect(calls[0]!.identity).toEqual({ role: "shopper", shopperId: a.id });
+  expect(calls[0]!.input.agentResponse).toBe("force_respond");
+  expect(dispatches).toHaveLength(1);
 });
 
 test("shopper DM always triggers; client DM and linked manual DM never do", async () => {

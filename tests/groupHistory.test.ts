@@ -59,6 +59,15 @@ test("history capture is default-on with strict false opt-out", () => {
   expect(() => loadConfig({ ...env, WHATSAPP_CAPTURE_GROUP_HISTORY: "0" })).toThrow();
 });
 
+test("unregistered-chat relay is default-off with strict true opt-in", () => {
+  const env = { GATEWAY_ADMIN_TOKEN: "admin-0123456789012345", DATA_ENCRYPTION_KEY: "00".repeat(32) };
+  expect(loadConfig(env).relayUnregisteredChats).toBe(false);
+  resetConfigForTests();
+  expect(loadConfig({ ...env, RELAY_UNREGISTERED_CHATS: "true" }).relayUnregisteredChats).toBe(true);
+  resetConfigForTests();
+  expect(() => loadConfig({ ...env, RELAY_UNREGISTERED_CHATS: "1" })).toThrow();
+});
+
 test("only self-joined groups are captured, once per group per batch, oldest first", async () => {
   const app = setup();
   await app.history([message("before-join")]);

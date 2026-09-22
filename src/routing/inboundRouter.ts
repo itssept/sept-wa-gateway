@@ -27,6 +27,10 @@ interface RoutingDeps {
   /** Add a WhatsApp reaction to an inbound message. Best-effort; optional so
    *  tests and non-reacting wirings can omit it. */
   reactToMessage?: (msg: InboundMessage, emoji: string) => Promise<void>;
+  /** Relay ownerless (unregistered DM / unqualified group) chats to the common
+   *  room. Off by default: such chats are dropped (audited), never relayed,
+   *  until an enabled registered shopper qualifies them. */
+  relayUnregisteredChats?: boolean;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -95,6 +99,19 @@ export class InboundRouter {
     );
   }
 
+  /** Ownerless chats (unregistered DM sender, unqualified group) relay as the
+   *  Client SA in the common room only when RELAY_UNREGISTERED_CHATS is on.
+   *  Otherwise drop (audited) until an enabled registered shopper qualifies. */
+  private unregisteredAllowed(connectionId: string, chatJid: string): boolean {
+    if (this.deps.relayUnregisteredChats) return true;
+    this.audit.record("inbound.rejected", {
+      subjectType: "connection", subjectId: connectionId,
+      detail: { chatJid: maskJid(chatJid), reason: "unregistered_chat_relay_disabled" },
+    });
+    this.log.info("unregistered chat dropped", { chatJid: maskJid(chatJid), reason: "unregistered_chat_relay_disabled" });
+    return false;
+  }
+
   private clientReady(connectionId: string, chatJid: string): boolean {
     if (this.deps.settings.getStatus().setupComplete) return true;
     this.audit.record("inbound.rejected", {
@@ -126,6 +143,7 @@ export class InboundRouter {
       const owner = fixed ? this.resolver.byId(ownerId) : candidate;
       const roomName = fixed?.roomName ?? owner?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
       if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
+      if (ownerId === null && !this.unregisteredAllowed(msg.connectionId, msg.chatJid)) return null;
       return { owner, ownerId, roomName, qualified: Boolean(candidate) };
     }
     // fromMe is the linked phone, so use its peer to determine a fresh DM's owner.
@@ -136,6 +154,7 @@ export class InboundRouter {
     const owner = fixed ? this.resolver.byId(ownerId) : candidate;
     const roomName = fixed?.roomName ?? candidate?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
     if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
+    if (ownerId === null && !this.unregisteredAllowed(msg.connectionId, msg.chatJid)) return null;
     return { owner, ownerId, roomName, qualified: false };
   }
 

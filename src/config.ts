@@ -87,6 +87,13 @@ const EnvSchema = z.object({
   WHATSAPP_CAPTURE_GROUP_HISTORY: z.enum(["true", "false"]).default("true")
     .transform((value) => value === "true"),
 
+  // Relay chats with no owning shopper (unregistered DM sender, unqualified
+  // group) to PromptQL as the Client SA in the common room. Disabled by
+  // default: such chats are dropped (audited), never relayed, until an enabled
+  // registered shopper qualifies them.
+  RELAY_UNREGISTERED_CHATS: z.enum(["true", "false"]).default("false")
+    .transform((value) => value === "true"),
+
   WHATSAPP_HISTORY_JOIN_WAIT_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
 
   // Retention.
@@ -143,6 +150,8 @@ export interface Config {
   messageRetentionDays: number;
   captureGroupHistory: boolean;
   historyJoinWaitMs: number;
+  /** Relay ownerless (unregistered/unqualified) chats to the common room. */
+  relayUnregisteredChats: boolean;
 
   mcp: {
     /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
@@ -192,6 +201,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
     captureGroupHistory: e.WHATSAPP_CAPTURE_GROUP_HISTORY,
     historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
+    relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
 
     mcp: {
       endpoint: e.PROMPTQL_MCP_URL,
