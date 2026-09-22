@@ -274,3 +274,74 @@ test("dispatcher does not scan a declined-approval notice for artifacts", async 
   expect(resolveCalled).toBe(false);
   db.close();
 });
+
+test("dispatcher automatically attaches responseArtifacts when PromptQL server converted artifact tags to permalinks", async () => {
+  const { ctx, db } = makeTestApp(testConfig());
+  const chat = "shopper@s.whatsapp.net";
+  ctx.chatBots.upsert({ connectionId: "test-conn", chatJid: chat, shopperId: "s", threadId: "bot" });
+  const workflow = ctx.workflows.create({
+    connectionId: "test-conn", chatJid: chat, shopperId: "s", inboundMessageId: "input", remoteRef: "bot",
+  });
+  const claim = ctx.outboundLog.claim("test-conn", "input");
+  if (claim.status !== "claimed") throw new Error("expected claim");
+
+  const serverMessage = `Logged Noor in IT 40. Here is the commercial invoice for $5,000 USD:\n\nhttps://ql.app/l/Xxfa0Am6\n\nReady to dispatch link once confirmed.\n\n🧠 Teach SEPT → https://ql.app/l/i44VehWS`;
+
+  let sentDoc: any = null;
+  const dispatcher = new OutboundDispatcher(
+    {
+      waitForResponse: async () => ({
+        status: "completed",
+        message: serverMessage,
+        artifacts: [
+          {
+            identifier: "invoice-INV-3288",
+            title: "Invoice INV-3288",
+            artifact_type: "file",
+            artifact_reference: { artifact_id: "art-uuid-1", version: 0 },
+          },
+        ],
+      }),
+      resolveArtifacts: async (_identity: any, _respArts: any[], refs: any[]) => {
+        expect(refs).toEqual([{ identifier: "invoice-INV-3288", type: "file" }]);
+        return [{
+          ok: true,
+          artifact: {
+            identifier: "invoice-INV-3288",
+            title: "Invoice INV-3288",
+            fileName: "INV-3288.pdf",
+            mimeType: "application/pdf",
+            bytes: Buffer.from("PDF_BYTES"),
+          },
+        }];
+      },
+    } as never,
+    ctx.workflows, ctx.outboundLog,
+    {
+      sendText: async () => { throw new Error("should send document, not text"); },
+      sendDocument: async (_jid: string, doc: any, opts: any) => {
+        opts.onMessageId("doc-1");
+        sentDoc = doc;
+        return "doc-1";
+      },
+    } as never,
+    ctx.config, ctx.log, ctx.chatBots,
+  );
+
+  await dispatcher.dispatch({
+    workflowId: workflow.id, connectionId: "test-conn", chatJid: chat,
+    shopperId: "s", idempotencyKey: "input", claimToken: claim.token,
+    threadId: "bot", threadEventId: null,
+  });
+
+  expect(sentDoc).not.toBeNull();
+  expect(sentDoc.fileName).toBe("INV-3288.pdf");
+  expect(sentDoc.mimeType).toBe("application/pdf");
+  expect(sentDoc.bytes.toString()).toBe("PDF_BYTES");
+  // Permalinks are cleaned from caption, but teach link is preserved
+  expect(sentDoc.caption).toContain("Logged Noor in IT 40.");
+  expect(sentDoc.caption).toContain("🧠 Teach SEPT → https://ql.app/l/i44VehWS");
+  expect(sentDoc.caption).not.toContain("https://ql.app/l/Xxfa0Am6");
+
+  db.close();
+});

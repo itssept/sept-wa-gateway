@@ -20,7 +20,7 @@ import { isGroupJid } from "../util.ts";
 import {
   parseArtifactRefs,
   type PromptQlAdapter, type ArtifactOutcome, type ArtifactFailureReason,
-  type ResponseArtifact,
+  type ResponseArtifact, type ArtifactRef,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
@@ -76,7 +76,7 @@ export class OutboundDispatcher {
       // completed or declined_approval both produce a message to send back.
       answer = res.message;
       completed = res.status === "completed";
-      if (res.status === "completed") responseArtifacts = res.artifacts;
+      if (res.status === "completed") responseArtifacts = res.artifacts ?? [];
     } catch (err) {
       this.fail(input, `PromptQL error: ${String(err)}`);
       return;
@@ -84,9 +84,27 @@ export class OutboundDispatcher {
 
     // Split inline <artifact/> references off the completed text. The stripped
     // text becomes the reply caption; the refs are fetched and attached with it.
-    const { text: strippedAnswer, refs } = completed && answer
+    let { text: strippedAnswer, refs } = completed && answer
       ? parseArtifactRefs(answer)
       : { text: answer ?? "", refs: [] };
+
+    // Fallback: When PromptQL server replaces <artifact ... /> with public permalinks
+    // (e.g. https://ql.app/l/...), parseArtifactRefs sees no XML tags. Detect any file/pdf
+    // artifacts in responseArtifacts directly so documents are sent as native WhatsApp attachments.
+    if (completed && refs.length === 0 && Array.isArray(responseArtifacts) && responseArtifacts.length > 0) {
+      const docArtifacts = responseArtifacts.filter(
+        (a) => a.artifact_type === "file" || a.artifact_type === "pdf" ||
+          a.artifact_type === "document" || a.identifier.toLowerCase().includes("inv")
+      );
+      if (docArtifacts.length > 0) {
+        refs = docArtifacts.map((a): ArtifactRef => ({
+          identifier: a.identifier,
+          type: a.artifact_type ?? "file",
+        }));
+        // Remove bare artifact permalink lines from the text so we don't repeat links in the caption
+        strippedAnswer = cleanArtifactPermalinks(strippedAnswer);
+      }
+    }
 
     const canSend = () => !isGroupJid(input.chatJid) ||
       this.chatBots.get(input.connectionId, input.chatJid)?.relayPausedAt == null;
@@ -211,6 +229,18 @@ export class OutboundDispatcher {
       reason,
     });
   }
+}
+
+/**
+ * Remove bare PromptQL permalinks (https://ql.app/l/...) that own a whole line,
+ * while preserving "Teach SEPT -> https://ql.app/l/..." teaching links.
+ */
+export function cleanArtifactPermalinks(text: string): string {
+  const permalinkOnlyLine = /^[ \t]*https:\/\/ql\.app\/l\/[A-Za-z0-9]+[ \t]*$/gm;
+  return text
+    .replace(permalinkOnlyLine, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
