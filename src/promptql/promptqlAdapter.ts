@@ -411,7 +411,7 @@ export class PromptQlAdapter {
         return {
           status: "declined_approval",
           message:
-            "This request needs approval for a sensitive action. It was not auto-approved — please review it in the PromptQL console.",
+            "This request needs approval for a sensitive action. It was not auto-approved — please review it in the workspace.",
         };
       }
       if (status === "failed" || status === "error" || status === "cancelled") {
