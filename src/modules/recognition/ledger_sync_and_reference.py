@@ -1,5 +1,6 @@
 import json
-import uuid
+import hashlib
+import re
 from datetime import datetime, timezone, timedelta
 from executor import aio, executor
 
@@ -31,11 +32,11 @@ REFERENCE_CULTURE_REGISTRY = [
             "hardware": "GHW",
             "category": "Bags"
         },
-        "notes": "Jennifer Lopez gym street style; Birkin 35 Ostrich."
+        "notes": "Jennifer Lopez archival Hermès Birkin 35 in Ostrich leather with gold hardware."
     },
     {
-        "alias": "kendall jenner cipriani london look / burgundy bag",
-        "keywords": ["kendall", "cipriani", "burgundy", "unquilted"],
+        "alias": "kendall jenner cipriani london look",
+        "keywords": ["kendall", "cipriani", "burgundy"],
         "resolved_spec": {
             "brand": "Chanel",
             "model": "Pre-Fall Métiers d'Art Soft Unquilted Flap",
@@ -65,17 +66,51 @@ def resolve_reference_culture(query: str):
     return {
         "resolved": False,
         "confidence": "low",
-        "notes": "Ambiguous reference. Sourcing rules require explicit operator clarification instead of speculative guessing."
+        "notes": "Ambiguous reference. Sourcing rules require explicit operator clarification."
     }
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    # Lowercase, strip non-alphanumeric except spaces
+    cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', str(text).lower())
+    return " ".join(cleaned.split())
+
+def generate_canonical_item_id(parsed_item: dict) -> str:
+    """
+    Generates a deterministic canonical item ID across chats and threads based on
+    core item characteristics and source identity.
+    
+    Guarantees: The same piece from the same sourcer gets the EXACT SAME item ID
+    across different chats, preventing ID fragmentation.
+    """
+    brand = normalize_text(parsed_item.get("brand", ""))
+    model = normalize_text(parsed_item.get("model", ""))
+    size = normalize_text(parsed_item.get("size", ""))
+    colour = normalize_text(parsed_item.get("colour", ""))
+    material = normalize_text(parsed_item.get("material", ""))
+    hardware = normalize_text(parsed_item.get("hardware", ""))
+    
+    source_meta = parsed_item.get("source_metadata", {})
+    sourcer = normalize_text(source_meta.get("sourcer_handle_or_name", ""))
+    
+    # Core fingerprint string
+    fingerprint = f"{brand}|{model}|{size}|{colour}|{material}|{hardware}|{sourcer}"
+    hash_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:10]
+    
+    brand_prefix = (brand[:3] if brand else "itm").upper()
+    return f"{brand_prefix}_{hash_digest}"
 
 class OperatorLedger:
     def __init__(self, operator_id: str):
         self.operator_id = operator_id
         self.inventory = []
         self.sourcers = {}
+        self.inventory_by_id = {}
         
     def ingest_parsed_item(self, parsed_item: dict):
-        item_id = str(uuid.uuid4())[:8]
+        # Deterministic cross-chat item ID
+        item_id = generate_canonical_item_id(parsed_item)
         now = datetime.now(timezone.utc)
         
         # 1. Update sourcer stub if present
@@ -93,7 +128,19 @@ class OperatorLedger:
             }
         self.sourcers[sourcer_handle]["items_logged_count"] += 1
         
-        # 2. Ingest inventory record
+        # 2. Check if item already exists in ledger (deduplication / update)
+        if item_id in self.inventory_by_id:
+            existing = self.inventory_by_id[item_id]
+            # Update price/provenance if newer or if price arrived
+            new_price = parsed_item.get("pricing", {}).get("amount")
+            if new_price is not None:
+                existing["price"] = new_price
+                existing["currency"] = parsed_item.get("pricing", {}).get("currency")
+                existing["price_type"] = parsed_item.get("pricing", {}).get("price_type", "asking")
+            existing["last_seen"] = now.isoformat()
+            return existing
+        
+        # Ingest new inventory record
         inv_record = {
             "item_id": item_id,
             "brand": parsed_item.get("brand"),
@@ -111,15 +158,19 @@ class OperatorLedger:
             "sourcer": sourcer_handle,
             "location": source_meta.get("location") or "Unspecified",
             "date_logged": now.isoformat(),
+            "last_seen": now.isoformat(),
             "lifecycle_status": "available",
             "provenance": parsed_item.get("provenance", "observed_in_chat"),
+            "visual_conflict": parsed_item.get("visual_conflict", {}),
             "ambiguity_notes": parsed_item.get("ambiguity_notes", "")
         }
+        
         self.inventory.append(inv_record)
+        self.inventory_by_id[item_id] = inv_record
         return inv_record
 
 async def main():
-    executor.print("Testing Step 2: Reference Culture Resolution & Ledger Ingestion...\n")
+    executor.print("Starting Reference Culture & Ledger Ingestion...\n")
     
     # 1. Reference Culture Tests
     queries = [
@@ -142,6 +193,26 @@ async def main():
     
     # Ingesting the items parsed from Step 1
     sample_parsed_items = [
+        {
+            "brand": "Chanel",
+            "model": "Pre-Fall 2013 Paris-Edinburgh Burgundy Tassel Bag",
+            "category": "Bags",
+            "size": "Medium",
+            "colour": "Burgundy",
+            "material": "Quilted Calfskin",
+            "hardware": "Ruthenium",
+            "condition": "Vintage / Excellent",
+            "completeness": {"full_set": False},
+            "pricing": {"amount": None, "currency": "USD", "price_type": "pending_quote"},
+            "source_metadata": {"sourcer_handle_or_name": "@les_intemporels_paris", "channel": "whatsapp", "location": "Paris"},
+            "provenance": "stated_by_sourcer",
+            "visual_conflict": {
+                "has_conflict": True,
+                "bot_visual_guess": "Paris-Byzance Pre-Fall 2011",
+                "sourcer_stated_id": "Pre Fall 2013, Paris-Edinburgh Collection",
+                "resolution_notes": "Visual tassel features could resemble Byzance, but sourcer Les Intemporels Paris explicitly confirmed Paris-Edinburgh 2013. Deferring strictly to sourcer attribution."
+            }
+        },
         {
             "brand": "Hermès",
             "model": "Kelly 28",
@@ -168,20 +239,6 @@ async def main():
             "completeness": {"full_set": False},
             "pricing": {"amount": 8200, "currency": "GBP", "price_type": "quoted"},
             "source_metadata": {"sourcer_handle_or_name": "VIP Sourcing Chat", "channel": "whatsapp", "location": "London"},
-            "provenance": "observed_in_chat"
-        },
-        {
-            "brand": "Bottega Veneta",
-            "model": "Jodie",
-            "category": "Bags",
-            "size": "Teen / Small",
-            "colour": "Parakeet",
-            "material": "Intrecciato Lambskin",
-            "hardware": "Gold Tone",
-            "condition": "Store Fresh",
-            "completeness": {"full_set": True},
-            "pricing": {"amount": 2800, "currency": "EUR", "price_type": "asking"},
-            "source_metadata": {"sourcer_handle_or_name": "@edp_luxury", "channel": "whatsapp", "location": "Milan"},
             "provenance": "observed_in_chat"
         }
     ]
