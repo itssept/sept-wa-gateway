@@ -6,37 +6,30 @@ LUXURY_EXTRACTION_SCHEMA = {
     "type": "object",
     "properties": {
         "brand": {"type": "string", "description": "Luxury house/brand name, e.g., Hermès, Chanel, Bottega Veneta, Goyard"},
-        "model": {"type": "string", "description": "Specific model name or silhouette, e.g., Birkin 25, Kelly 28, Classic Flap, Jodie"},
+        "model": {"type": "string", "description": "Specific model name or silhouette / collection name as stated by sourcer or verified catalog"},
         "category": {"type": "string", "description": "Product category: Bags, Shoes, Ready-to-Wear, Jewelry, Watches, Accessories"},
         "size": {"type": "string", "description": "Dimension in cm or size stated/converted, e.g., 25, 28, FR 36 / US 4, EU 38"},
         "colour": {"type": "string", "description": "Colour name, e.g., Noir, Gold, Etoupe, Parakeet, Craie, Port/Burgundy"},
         "material": {"type": "string", "description": "Specific leather/fabric/texture, e.g., Togo, Epsom, Clemence, Caviar, Lambskin, Flat crystal strass"},
-        "hardware": {
-            "type": "string",
-            "description": "Hardware plating: GHW (Gold), PHW (Palladium), SHW (Silver), RHW (Rose Gold), BGHW (Brushed Gold), or 'ambiguous (lighting)'"
-        },
-        "condition": {
-            "type": "string",
-            "description": "Graded condition: Store Fresh, BNIB, Pristine, Excellent, Very Good, Vintage, or Unknown"
-        },
+        "hardware": {"type": "string", "description": "Hardware specification: GHW, PHW, SHW, RHW, BGHW, BPHW, Ruthenium, or 'ambiguous (lighting)'"},
+        "condition": {"type": "string", "description": "Condition grade: BNIB, Store Fresh, Pristine, Excellent, Very Good, Good, Vintage, or Unknown"},
         "completeness": {
             "type": "object",
             "properties": {
                 "box": {"type": "boolean"},
                 "dust_bag": {"type": "boolean"},
                 "receipt": {"type": "boolean"},
+                "authenticity_card": {"type": "boolean"},
                 "tags": {"type": "boolean"},
-                "authenticity_card_or_stamp": {"type": "boolean"},
                 "full_set": {"type": "boolean"}
-            },
-            "required": ["full_set"]
+            }
         },
         "pricing": {
             "type": "object",
             "properties": {
                 "amount": {"type": ["number", "null"]},
                 "currency": {"type": ["string", "null"]},
-                "price_type": {"type": "string", "enum": ["asking", "offered", "quoted", "paid", "unknown"]}
+                "price_type": {"type": "string", "enum": ["asking", "offered", "quoted", "paid", "pending_quote"]}
             },
             "required": ["amount", "currency", "price_type"]
         },
@@ -52,6 +45,16 @@ LUXURY_EXTRACTION_SCHEMA = {
         "provenance": {
             "type": "string",
             "enum": ["stated_by_operator", "stated_by_sourcer", "observed_in_chat", "estimated_by_agent"]
+        },
+        "visual_conflict": {
+            "type": "object",
+            "properties": {
+                "has_conflict": {"type": "boolean", "description": "Whether bot's visual guess conflicts with sourcer/operator stated identification"},
+                "bot_visual_guess": {"type": ["string", "null"], "description": "What the bot's ungrounded visual reading might have guessed"},
+                "sourcer_stated_id": {"type": ["string", "null"], "description": "The sourcer's explicit identification which strictly wins"},
+                "resolution_notes": {"type": "string", "description": "Explanation noting the visual conflict while strictly deferring to the sourcer"}
+            },
+            "required": ["has_conflict", "resolution_notes"]
         },
         "ambiguity_notes": {"type": "string", "description": "Any ambiguous lighting, unconfirmed condition, or unlisted status notes"}
     },
@@ -72,13 +75,20 @@ LUXURY_EXTRACTION_SCHEMA = {
 SYSTEM_PROMPT = """You are SEPT's luxury parser and vision extraction engine.
 Extract structured luxury attributes from inbound supplier forwards, chat screenshots, or images.
 
-Adhere strictly to luxury trade conventions:
-- Hardware: GHW (Gold), PHW (Palladium), SHW (Silver), RHW (Rose Gold), BGHW (Brushed Gold), BPHW (Brushed Palladium). If lighting makes plating unclear, mark hardware as 'ambiguous (lighting)'.
-- Leathers & Materials: Togo, Epsom, Clemence, Swift, Box, Chevre, Caviar, Lambskin, Croc, Ostrich. Distinguish flat crystal strass from 3D raised appliqués.
-- Sizes: Extract dimensions in cm (e.g. K28 -> Kelly 28cm, B25 -> Birkin 25cm).
-- Conditions: BNIB (Brand New In Box), Store Fresh, Full Set (FS), Pristine, Excellent, Vintage. If not stated, mark as 'Unknown'.
-- Provenance: Mark 'observed_in_chat' if extracted from forwarded supplier text/chat, 'stated_by_operator' if operator stated, or 'estimated_by_agent' if inferred.
-- Never invent retail SKUs, authenticity guarantees, or non-existent provenance.
+Core Invariants for Item Identification & Grounding:
+1. SOURCER ATTRIBUTION WINS OVER VISUAL GUESS:
+   - When a sourcer (or operator) explicitly states or names a piece, collection, season, or provenance (e.g. 'Pre-Fall 2013 Paris-Edinburgh Collection'), the sourcer's stated identification STRICTLY WINS over any visual guess (e.g. 'Byzance').
+   - Set `provenance` to `stated_by_sourcer`.
+   - Never override or contradict explicit sourcer attribution with speculative visual inferences or fabricated lore.
+   - If the visual features could suggest a different collection, note the conflict in `visual_conflict` (e.g. noting the visual guess and explaining why the sourcer's identification wins), but the canonical `model` and item description MUST defer to the sourcer.
+
+2. Luxury Trade Conventions:
+   - Hardware: GHW (Gold), PHW (Palladium), SHW (Silver), RHW (Rose Gold), BGHW (Brushed Gold), BPHW (Brushed Palladium). If lighting makes plating unclear, mark hardware as 'ambiguous (lighting)'.
+   - Leathers & Materials: Togo, Epsom, Clemence, Swift, Box, Chevre, Caviar, Lambskin, Croc, Ostrich. Distinguish flat crystal strass from 3D raised appliqués.
+   - Sizes: Extract dimensions in cm (e.g. K28 -> Kelly 28cm, B25 -> Birkin 25cm).
+   - Conditions: BNIB (Brand New In Box), Store Fresh, Full Set (FS), Pristine, Excellent, Very Good, Good, Vintage. If not stated, mark as 'Unknown'.
+   - Provenance: Mark 'stated_by_sourcer' if stated by sourcer, 'stated_by_operator' if operator stated, 'observed_in_chat' if extracted from chat, or 'estimated_by_agent' if inferred.
+   - Never invent retail SKUs, authenticity guarantees, or non-existent provenance.
 """
 
 async def parse_luxury_input(text_context: str, image_bytes: bytes = None, image_mime_type: str = "image/jpeg"):
@@ -101,16 +111,16 @@ async def parse_luxury_input(text_context: str, image_bytes: bytes = None, image
     return extracted_data
 
 async def main():
-    executor.print("Testing parse_luxury_item.py across representative luxury supplier forwards...\n")
+    executor.print("Starting Luxury Item Extraction Tests...\n")
     
     test_cases = [
         {
-            "name": "Case 1: Hermès Shorthand Supplier Group Forward",
-            "context": "Forwarded from @edp_luxury on WhatsApp: 'K28 Gold GHW Togo leather, Store Fresh / full set with receipt 2026 stamp. Asking €18,500. Located in Paris, can ship DHL Express worldwide.'"
+            "name": "Case 1: Sourcer Overrides Visual (Les Intemporels Paris-Edinburgh vs Byzance)",
+            "context": "Forwarded from @les_intemporels_paris: 'Photo attached of vintage Chanel burgundy quilted shoulder bag with Byzantine-style chainmail tassel and ruthenium plaque. Bag is from Pre Fall 2013, Paris-Edinburgh Collection. Price will follow.'"
         },
         {
-            "name": "Case 2: Chanel Shorthand with Ambiguous Lighting",
-            "context": "Forwarded from VIP Sourcing Chat: 'Chanel CF M/L black caviar, hardware looks gold but photo is warm-lit in boutique. BNIB complete with magnetic box, microchip, dustbag. No receipt. Quoted £8,200.'"
+            "name": "Case 2: Standard Hermès Supply Ingestion",
+            "context": "Forwarded from @edp_luxury: 'Hermès Kelly 28 Gold Togo GHW, Store Fresh, Full Set with receipt dated last week. Asking 18,500 EUR.'"
         },
         {
             "name": "Case 3: Multilingual Mixed Ready-to-Wear Forward",
