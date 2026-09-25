@@ -76,6 +76,7 @@ async function main(): Promise<void> {
     config,
     ctx.log.child({ component: "outbound" }),
     ctx.chatBots,
+    ctx.welcomeLog,
   );
 
   router = new InboundRouter(
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
     ctx.log.child({ component: "inbound" }),
     {
       settings: ctx.gatewaySettings, messages: ctx.messages,
+      welcomeLog: ctx.welcomeLog,
       getGroup: (jid) => connection.routingGroup(jid),
       prepareHistory: (row) => connection.prepareHistoryMessage(row),
       reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),

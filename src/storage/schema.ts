@@ -302,4 +302,25 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE gateway_settings ADD COLUMN client_service_account_id TEXT;
     `,
   },
+  {
+    version: 10,
+    name: "operator_welcome_log",
+    sql: /* sql */ `
+      -- Per-operator welcome message delivery and feedback tracking (Room 13).
+      -- Exactly once per operator, delivered on their first inbound 1:1 DM.
+      CREATE TABLE IF NOT EXISTS operator_welcome_log (
+        shopper_id              TEXT NOT NULL,
+        connection_id           TEXT NOT NULL,
+        welcome_sent            INTEGER NOT NULL DEFAULT 0,
+        sent_at                 TEXT,
+        feedback_prompt_sent    INTEGER NOT NULL DEFAULT 0,
+        feedback_prompt_sent_at TEXT,
+        created_at              TEXT NOT NULL,
+        updated_at              TEXT NOT NULL,
+        PRIMARY KEY (shopper_id, connection_id),
+        FOREIGN KEY (shopper_id) REFERENCES shopper(id)
+      );
+      CREATE INDEX IF NOT EXISTS ix_welcome_log_shopper ON operator_welcome_log (shopper_id);
+    `,
+  },
 ];
