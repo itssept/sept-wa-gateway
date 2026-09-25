@@ -46,9 +46,40 @@ Registration provisions accounts, workspace scoping, and gateway credentials onl
 1. **Save Contact**: Yara sends the operator the **SEPT WhatsApp Gateway Number**: **`+1 (650) 313-4725`**. The operator saves this contact in their phone as **"SEPT"**.
 2. **First Direct Message (Welcome Delivery Trigger)**: 
    - The operator opens a 1-on-1 WhatsApp chat with `+1 (650) 313-4725` and sends any greeting or message (e.g. *"Hey SEPT"* or *"Hi"*).
-   - Per **Room 13 (Welcome message delivery)**, SEPT delivers the approved welcome greeting and initial capability brief (defined in **Room 12**) strictly as its **reply to this first 1:1 inbound DM**.
+   - Per **Room 13 (Welcome message delivery)**, SEPT delivers the approved welcome greeting strictly as its **reply to this first 1:1 inbound DM**.
    - The welcome reply is sent once, never in group chats, and never unsolicited.
-3. **Add SEPT to Sourcer Groups**: The operator invites `+1 (650) 313-4725` to their luxury supplier/sourcer WhatsApp groups.
+
+### Final Approved Operator Welcome Message Template (Room 12):
+```text
+Hi, this is SEPT.
+
+I help you sell luxury — in the chats you already use.
+
+I can:
+* Remember pieces as they come in
+* Match what’s available to the right clients
+* Remember requests, sizes, prices, and open deals
+* Track client shipments
+* Draft messages in your voice, for your approval
+* Prep invoices and payment summaries
+
+I only see conversations I’m added to. Add me to the chats where you buy, sell, and talk to clients.
+
+How can I help?
+```
+*(No error, support, or feedback lines in the welcome message — kept clean and focused strictly on value.)*
+
+3. **Operator Feedback Prompt Rules**:
+Do NOT ask for feedback or support in the welcome message. Trigger it only after the operator has actually used SEPT once so it feels earned:
+- **Trigger Moments**:
+  1. *After the first useful action* (first match, draft, or remembered piece) — short follow-up in that same chat.
+  2. *Day 2 or 3* if they’ve been quiet but active — one soft check-in.
+  3. *Never* on first touch, and *never* tied to an error.
+- **Line to Use**:
+  > *"Feedback for the team? Message Yara anytime."*
+- **Delivery Invariant**: Send strictly **once** (record `feedback_prompt_sent` state), then stop. Never repeat daily.
+
+4. **Add SEPT to Sourcer Groups**: The operator invites `+1 (650) 313-4725` to their luxury supplier/sourcer WhatsApp groups.
    - **Group Ownership**: The inviting operator is assigned permanent ownership of the group.
    - **History Replay**: WhatsApp group history is captured and silently ingested into their sealed ledger with `force_skip`.
 
