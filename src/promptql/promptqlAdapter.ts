@@ -242,6 +242,11 @@ export class AskSubmissionError extends McpError {
   }
 }
 
+/** Ensure query meets PromptQL MCP minimum length of 3 characters by padding. */
+export function normalizeQueryForMcp(query: string): string {
+  return query.length < 3 ? query.padEnd(3, " ") : query;
+}
+
 const AskArgsSchema = z.object({
   query: z.string().min(1),
   thread_id: z.string().min(1).optional(),
@@ -352,7 +357,7 @@ export class PromptQlAdapter {
     // Project-scoped servers may omit project_name from their schema. Keep it
     // optional for the existing endpoint; configure it for servers requiring it.
     const args = AskArgsSchema.parse({
-      query: input.query,
+      query: normalizeQueryForMcp(input.query),
       ...(input.threadId ? { thread_id: input.threadId } : {}),
       ...(input.roomName ? { room_name: input.roomName } : {}),
       ...(input.files?.length ? { files: input.files } : {}),

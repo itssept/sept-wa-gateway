@@ -6,6 +6,7 @@
 import { test, expect, afterEach } from "bun:test";
 import {
   PromptQlAdapter, AskSubmissionError, promptQlFileFromMedia, parseArtifactRefs,
+  normalizeQueryForMcp,
 } from "../src/promptql/promptqlAdapter.ts";
 import { testConfig } from "./helpers.ts";
 import { TransientMediaDownloader } from "../src/whatsapp/media.ts";
@@ -169,6 +170,12 @@ test("ask shapes group response control, instruction and configured project name
     query: "[Alice] hello", agent_response: "force_respond",
     system_instruction: "Reply to the tagger.", project_name: "sept",
   });
+});
+
+test("normalizeQueryForMcp pads short queries to at least 3 characters", () => {
+  expect(normalizeQueryForMcp("s")).toBe("s  ");
+  expect(normalizeQueryForMcp("hi")).toBe("hi ");
+  expect(normalizeQueryForMcp("hello")).toBe("hello");
 });
 
 test("force_skip makes only the ask call; optional project name is omitted", async () => {
