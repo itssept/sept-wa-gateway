@@ -12,16 +12,19 @@ import type { ChatBotRepo, ChatBot } from "../storage/chatBotRepo.ts";
 import type { MessageStore, StoredHistoryMessage } from "../storage/messageStore.ts";
 import type { GatewaySettingsRepo } from "../storage/gatewaySettingsRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
+import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
 import type { AuditLog } from "../storage/auditLog.ts";
 import type { OutboundDispatcher } from "./outboundDispatcher.ts";
 import type { Logger } from "../logger.ts";
 import type { Shopper } from "../domain/types.ts";
 import { clientQuery, mediaLabel, paPrompt } from "./groupRelay.ts";
+import { buildWelcomeReply } from "../domain/welcomeMessage.ts";
 import { maskJid, phoneE164FromJid, nowIso } from "../util.ts";
 
 interface RoutingDeps {
   settings: GatewaySettingsRepo;
   messages: MessageStore;
+  welcomeLog?: WelcomeLogRepo;
   getGroup: (groupJid: string) => Promise<RoutingGroup | null>;
   prepareHistory: (row: StoredHistoryMessage) => Promise<InboundMessage | null>;
   /** Add a WhatsApp reaction to an inbound message. Best-effort; optional so
@@ -251,13 +254,30 @@ export class InboundRouter {
       const shopperTrigger = !msg.fromMe && identity.role === "shopper" && (!msg.isGroup || msg.mentionsSelf);
       const paTrigger = !msg.fromMe && msg.isGroup && dest.qualified && msg.mentionsSelf &&
         identity.role === "client" && dest.owner?.status === "enabled";
+
+      // Welcome message evaluation (Room 13):
+      // Trigger: Registered operator's first inbound 1:1 direct message (never in groups).
+      const isOperatorDM = !msg.fromMe && !msg.isGroup && identity.role === "shopper";
+      const isFirstOperatorDM = isOperatorDM &&
+        Boolean(this.deps.welcomeLog && !this.deps.welcomeLog.isWelcomeSent(identity.shopperId, msg.connectionId));
+
+      const rawQuery = identity.role === "client" ? clientQuery(msg) : promptQlQuery(msg)!;
+      let queryToSend = rawQuery;
+      let isWelcomeDispatch = false;
+
+      if (isFirstOperatorDM) {
+        const welcome = buildWelcomeReply(dest.owner?.name ?? "Operator", rawQuery);
+        queryToSend = welcome.prompt;
+        isWelcomeDispatch = true;
+      }
+
       const files = msg.mediaStatus === "ready" && msg.media
         ? [promptQlFileFromMedia(msg.media, mediaFileName(msg.messageId, msg.msgType, msg.media.mime ?? null))]
         : [];
       let ask: AskResult;
       try {
         ask = await this.submit(msg, dest, identity,
-          identity.role === "client" ? clientQuery(msg) : promptQlQuery(msg)!,
+          queryToSend,
           shopperTrigger ? "force_respond" : "force_skip", files, true, msg.messageId);
         this.deps.messages.markRelayed(msg.connectionId, msg.chatJid, msg.messageId);
       } finally {
@@ -288,6 +308,7 @@ export class InboundRouter {
         idempotencyKey: msg.messageId, claimToken: claim.token,
         threadId: ask.threadId, threadEventId: ask.threadEventId,
         pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
+        isWelcomeDispatch,
       }).catch((err) => log.error("outbound dispatch failed", { err }));
     } catch (err) {
       if (claimToken) this.outboundLog.markFailed(msg.connectionId, msg.messageId, claimToken);

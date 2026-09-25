@@ -30,6 +30,8 @@ import type { Config } from "../config.ts";
 import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
+import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
+
 export interface DispatchInput {
   workflowId: string;
   connectionId: string;
@@ -42,6 +44,8 @@ export interface DispatchInput {
   /** Routing may opt PA replies to clients into the extra pause. */
   pacingProfile?: PacingProfile;
   credentialRole?: "shopper" | "pa";
+  /** Flag indicating this dispatch delivers an operator welcome message reply (Room 13) */
+  isWelcomeDispatch?: boolean;
 }
 
 export class OutboundDispatcher {
@@ -53,6 +57,7 @@ export class OutboundDispatcher {
     private readonly config: Config,
     private readonly log: Logger,
     private readonly chatBots: ChatBotRepo,
+    private readonly welcomeLog?: WelcomeLogRepo,
   ) {}
 
   async dispatch(input: DispatchInput): Promise<void> {
@@ -172,8 +177,16 @@ export class OutboundDispatcher {
         input.claimToken,
         { chatJid: input.chatJid, messageRef: ref },
       );
-      if (ok) log.info("outbound sent", { messageRef: ref, attachments: artifacts.length, droppedArtifacts: failures.length });
-      else log.warn("outbound claim lost");
+      if (ok) {
+        log.info("outbound sent", { messageRef: ref, attachments: artifacts.length, droppedArtifacts: failures.length });
+        // Room 13: Store welcome_sent record the moment delivery of the reply is confirmed.
+        if (input.isWelcomeDispatch && this.welcomeLog) {
+          this.welcomeLog.recordWelcomeSent(input.shopperId, input.connectionId);
+          log.info("operator welcome sent confirmed and recorded", { shopperId: input.shopperId });
+        }
+      } else {
+        log.warn("outbound claim lost");
+      }
     } catch (err) {
       if (err instanceof Error && err.message === "chat_left") {
         this.fail(input, "chat_left");
@@ -181,6 +194,9 @@ export class OutboundDispatcher {
       }
       this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
       log.error("outbound send failed", { err });
+      if (input.isWelcomeDispatch) {
+        log.warn("operator welcome send failed, not marking welcome_sent", { shopperId: input.shopperId });
+      }
       // We won't reach the follow-up loop, so release the pending bytes here.
       for (const a of rest) a.bytes = Buffer.alloc(0);
       return;
