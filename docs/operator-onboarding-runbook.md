@@ -36,12 +36,18 @@ When invoked, the `register_operator` saved program automates the following step
 4. **Wiki Provisioning**: Generates `<Name> (WhatsApp Operator)` and linked service account identity pages, linked to `SEPT Operator Service Account Instructions`.
 5. **Gateway Registration**: Calls `POST /api/v1/shoppers` on `sept-wa-gateway` with fresh MCP tokens.
 
+*Important Invariant (Alignment with Room 12 & Room 13):*
+Registration provisions accounts, workspace scoping, and gateway credentials only. **No automated welcome message is pushed upon registration.** The welcome greeting and initial capability guidance await the operator's first inbound direct message.
+
 ---
 
 ## 3. What the Operator Receives and Must Do
 
 1. **Save Contact**: Yara sends the operator the **SEPT WhatsApp Gateway Number**: **`+1 (650) 313-4725`**. The operator saves this contact in their phone as **"SEPT"**.
-2. **First Direct Message**: The operator opens a 1-on-1 WhatsApp chat with `+1 (650) 313-4725` and messages (e.g. *"Hey SEPT, I'm ready"*). The gateway binds the chat to their dedicated workspace room.
+2. **First Direct Message (Welcome Delivery Trigger)**: 
+   - The operator opens a 1-on-1 WhatsApp chat with `+1 (650) 313-4725` and sends any greeting or message (e.g. *"Hey SEPT"* or *"Hi"*).
+   - Per **Room 13 (Welcome message delivery)**, SEPT delivers the approved welcome greeting and initial capability brief (defined in **Room 12**) strictly as its **reply to this first 1:1 inbound DM**.
+   - The welcome reply is sent once, never in group chats, and never unsolicited.
 3. **Add SEPT to Sourcer Groups**: The operator invites `+1 (650) 313-4725` to their luxury supplier/sourcer WhatsApp groups.
    - **Group Ownership**: The inviting operator is assigned permanent ownership of the group.
    - **History Replay**: WhatsApp group history is captured and silently ingested into their sealed ledger with `force_skip`.
