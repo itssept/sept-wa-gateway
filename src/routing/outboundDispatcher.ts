@@ -31,6 +31,7 @@ import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
+import { sanitizeOutboundText } from "./sanitizer.ts";
 
 export interface DispatchInput {
   workflowId: string;
@@ -141,9 +142,13 @@ export class OutboundDispatcher {
     const artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
     const failures = outcomes.flatMap((o) => (o.ok ? [] : [o.reason]));
 
-    // Caption = the reply text plus a short note about anything we couldn't
+    // Sanitize the outbound text to strip internal platform links, ql.app permalinks,
+    // "Teach SEPT" footers, and internal platform terms before sending to WhatsApp.
+    const sanitizedText = sanitizeOutboundText(strippedAnswer);
+
+    // Caption = the sanitized reply text plus a short note about anything we couldn't
     // attach. With no artifacts and no failures, this is just the text.
-    const caption = withFailureNote(strippedAnswer.trim(), failures);
+    const caption = withFailureNote(sanitizedText.trim(), failures);
     if (caption === "" && artifacts.length === 0) {
       // Nothing to say and nothing to attach — treat like an empty response.
       this.fail(input, "empty response");
