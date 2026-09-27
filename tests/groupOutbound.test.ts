@@ -338,9 +338,10 @@ test("dispatcher automatically attaches responseArtifacts when PromptQL server c
   expect(sentDoc.fileName).toBe("INV-3288.pdf");
   expect(sentDoc.mimeType).toBe("application/pdf");
   expect(sentDoc.bytes.toString()).toBe("PDF_BYTES");
-  // Permalinks are cleaned from caption, but teach link is preserved
+  // Permalinks and Teach SEPT links are cleaned from caption
   expect(sentDoc.caption).toContain("Logged Noor in IT 40.");
-  expect(sentDoc.caption).toContain("🧠 Teach SEPT → https://ql.app/l/i44VehWS");
+  expect(sentDoc.caption).not.toContain("Teach SEPT");
+  expect(sentDoc.caption).not.toContain("https://ql.app/l/i44VehWS");
   expect(sentDoc.caption).not.toContain("https://ql.app/l/Xxfa0Am6");
 
   db.close();
