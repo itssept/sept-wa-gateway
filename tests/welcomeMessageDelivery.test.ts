@@ -118,7 +118,8 @@ describe("Issue 13: Operator Welcome Message Delivery", () => {
     await router.handle(inbound);
 
     expect(calls.length).toBe(1);
-    expect(calls[0].input.query).toBe(OPERATOR_WELCOME_PROMPT);
+    expect(calls[0].input.query).toBe("hi");
+    expect(calls[0].input.agentResponse).toBe("force_skip");
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0].text).toContain("Hi, this is SEPT");
     expect(sentMessages[0].text).toContain("How can I help?");
@@ -145,11 +146,11 @@ describe("Issue 13: Operator Welcome Message Delivery", () => {
     await router.handle(inbound);
 
     expect(calls.length).toBe(1);
-    expect(calls[0].input.query).toContain(OPERATOR_WELCOME_BASE);
-    expect(calls[0].input.query).toContain("Can you check price for Chanel classic flap black caviar?");
+    expect(calls[0].input.query).toBe("Can you check price for Chanel classic flap black caviar?");
+    expect(calls[0].input.agentResponse).toBe("force_respond");
     expect(sentMessages.length).toBe(1);
     expect(sentMessages[0].text).toContain("Hi, this is SEPT");
-    expect(sentMessages[0].text).toContain("Operator Request:\nCan you check price for Chanel classic flap black caviar?");
+    expect(sentMessages[0].text).toContain("Can you check price for Chanel classic flap black caviar?");
   });
 
   it("Test 3: That operator's second DM does not get the welcome again", async () => {
@@ -357,7 +358,7 @@ describe("Issue 13: Operator Welcome Message Delivery", () => {
     await router.handle(dmInbound);
 
     expect(ctx.welcomeLog.isWelcomeSent(operator.id, "test-conn")).toBe(true);
-    expect(calls[1].input.query).toContain("Hi, this is SEPT");
+    expect(calls[1].input.query).toBe("hi");
   });
 
   it("Test 8: A non-operator number texting SEPT gets neither the welcome nor a setup prompt", async () => {
