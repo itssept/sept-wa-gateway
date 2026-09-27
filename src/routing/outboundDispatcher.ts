@@ -32,6 +32,7 @@ import { maskJid } from "../util.ts";
 
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
 import { sanitizeOutboundText } from "./sanitizer.ts";
+import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
 
 export interface DispatchInput {
   workflowId: string;
@@ -47,6 +48,8 @@ export interface DispatchInput {
   credentialRole?: "shopper" | "pa";
   /** Flag indicating this dispatch delivers an operator welcome message reply (Room 13) */
   isWelcomeDispatch?: boolean;
+  /** If true, prepends the approved operator welcome header to the response */
+  welcomePrefix?: boolean;
 }
 
 export class OutboundDispatcher {
@@ -142,9 +145,14 @@ export class OutboundDispatcher {
     const artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
     const failures = outcomes.flatMap((o) => (o.ok ? [] : [o.reason]));
 
+    // Prepend welcome header if requested for first inbound DM with request
+    const fullAnswer = input.welcomePrefix
+      ? `${OPERATOR_WELCOME_BASE}\n\n${strippedAnswer}`
+      : strippedAnswer;
+
     // Sanitize the outbound text to strip internal platform links, ql.app permalinks,
     // "Teach SEPT" footers, and internal platform terms before sending to WhatsApp.
-    const sanitizedText = sanitizeOutboundText(strippedAnswer);
+    const sanitizedText = sanitizeOutboundText(fullAnswer);
 
     // Caption = the sanitized reply text plus a short note about anything we couldn't
     // attach. With no artifacts and no failures, this is just the text.
@@ -237,6 +245,53 @@ export class OutboundDispatcher {
       } finally {
         artifact.bytes = Buffer.alloc(0);
       }
+    }
+  }
+
+  async dispatchDirectText(input: {
+    workflowId: string;
+    connectionId: string;
+    chatJid: string;
+    shopperId: string;
+    idempotencyKey: string;
+    claimToken: string;
+    text: string;
+    pacingProfile?: PacingProfile;
+    isWelcomeDispatch?: boolean;
+  }): Promise<void> {
+    const canSend = () => !isGroupJid(input.chatJid) ||
+      this.chatBots.get(input.connectionId, input.chatJid)?.relayPausedAt == null;
+    if (!canSend()) {
+      this.fail({ ...input, threadId: "", threadEventId: null }, "chat_left");
+      return;
+    }
+
+    const log = this.log.child({ corrId: input.idempotencyKey, chatJid: maskJid(input.chatJid) });
+    const sanitized = sanitizeOutboundText(input.text).trim();
+    this.workflows.markDone(input.workflowId, sanitized);
+
+    try {
+      const ref = await this.connection.sendText(input.chatJid, sanitized, {
+        pacingProfile: input.pacingProfile,
+        beforeSend: canSend,
+        onMessageId: (id) => this.outboundLog.recordGatewayMessage(input.connectionId, input.chatJid, id),
+      });
+      const ok = this.outboundLog.markSent(
+        input.connectionId,
+        input.idempotencyKey,
+        input.claimToken,
+        { chatJid: input.chatJid, messageRef: ref },
+      );
+      if (ok) {
+        log.info("direct text sent", { messageRef: ref });
+        if (input.isWelcomeDispatch && this.welcomeLog) {
+          this.welcomeLog.recordWelcomeSent(input.shopperId, input.connectionId);
+          log.info("operator welcome sent confirmed and recorded", { shopperId: input.shopperId });
+        }
+      }
+    } catch (err) {
+      this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
+      log.error("direct text send failed", { err });
     }
   }
 
