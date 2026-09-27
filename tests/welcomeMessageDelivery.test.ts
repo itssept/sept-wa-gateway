@@ -4,7 +4,7 @@ import { InboundRouter } from "../src/routing/inboundRouter.ts";
 import { OutboundDispatcher } from "../src/routing/outboundDispatcher.ts";
 import type { InboundMessage } from "../src/whatsapp/socket.ts";
 import type { PostingIdentity } from "../src/promptql/promptqlAdapter.ts";
-import { OPERATOR_WELCOME_BASE, OPERATOR_WELCOME_PROMPT } from "../src/domain/welcomeMessage.ts";
+import { OPERATOR_WELCOME_BASE } from "../src/domain/welcomeMessage.ts";
 
 describe("Issue 13: Operator Welcome Message Delivery", () => {
   function setupSuite() {
