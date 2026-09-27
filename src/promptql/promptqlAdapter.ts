@@ -48,7 +48,7 @@ const PromptQlFileInputSchema = z
   })
   .strict();
 
-const PromptQlFilesSchema = z.array(PromptQlFileInputSchema).max(1);
+const PromptQlFilesSchema = z.array(PromptQlFileInputSchema);
 
 export type PromptQlFileInput = z.infer<typeof PromptQlFileInputSchema>;
 

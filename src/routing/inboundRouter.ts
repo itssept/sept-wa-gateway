@@ -188,7 +188,7 @@ export class InboundRouter {
 
   /** Ownerless chats (unregistered DM sender, unqualified group) relay as the
    *  Client SA in the common room only when RELAY_UNREGISTERED_CHATS is on.
-   *  Otherwise drop (audited) until an enabled registered shopper qualifies. */
+   *  Otherwise drop (audited) until an enabled registered shopper qualifies them. */
   private unregisteredAllowed(connectionId: string, chatJid: string): boolean {
     if (this.deps.relayUnregisteredChats) return true;
     this.audit.record("inbound.rejected", {
@@ -321,16 +321,22 @@ export class InboundRouter {
   private formatBatchClientEnvelope(messages: InboundMessage[]): string {
     const first = messages[0];
     const textParts: string[] = [];
+    const hasText = messages.some((m) => m.text.trim().length > 0);
 
     for (const m of messages) {
       if (m.text.trim()) {
-        textParts.push(m.text);
+        textParts.push(m.text.trim());
       } else {
         const media = mediaLabel(m);
         if (media) {
           const fileName = media.fileName?.replace(/[\r\n\u2028\u2029]/g, " ").trim();
-          const desc = media.kind === "document" && fileName ? `(document: ${fileName})` : `(${media.kind})`;
-          textParts.push(desc);
+          if (media.kind === "document" && fileName) {
+            textParts.push(`(document: ${fileName})`);
+          } else if (!hasText && media.kind !== "image") {
+            textParts.push(`(${media.kind})`);
+          } else if (!hasText && media.kind === "image" && textParts.length === 0) {
+            textParts.push(`(${media.kind})`);
+          }
         }
       }
     }
@@ -406,11 +412,11 @@ export class InboundRouter {
         isWelcomeDispatch = true;
       }
 
+      // Collect all ready media files across all messages in the batch into files array
       const files: PromptQlFileInput[] = [];
       for (const m of validMessages) {
         if (m.mediaStatus === "ready" && m.media) {
           files.push(promptQlFileFromMedia(m.media, mediaFileName(m.messageId, m.msgType, m.media.mime ?? null)));
-          if (files.length >= 1) break; // PromptQL MCP ask tool accepts max 1 file attachment per turn
         }
       }
 
@@ -502,6 +508,7 @@ export class InboundRouter {
       if (!rows.length || !this.available(msg, epoch) || !this.clientReady(msg.connectionId, msg.chatJid)) return;
       const dest = await this.destination(msg);
       if (!dest || !this.available(msg, epoch)) return;
+
       try {
         // History can be the first traffic after registration too. Do not
         // carry the old common bot's live retry into the replacement bot.
@@ -535,8 +542,8 @@ export class InboundRouter {
           }
         }
         if (this.available(msg, epoch)) await this.submit(msg, dest, CLIENT, "End of history", "force_skip", [], false);
-      } catch (err) {
-        this.log.warn("history batch replay failed", { chatJid: maskJid(parsed.groupJid), err });
+      } catch {
+        this.log.warn("history bracket relay failed", { chatJid: maskJid(msg.chatJid) });
       }
     });
   }
@@ -548,6 +555,7 @@ export function promptQlQuery(msg: InboundMessage, _attached = false): string | 
   if (!media) return null;
   return media.kind === "document" && media.fileName ? `(document: ${media.fileName})` : `(${media.kind})`;
 }
+
 export function mediaFileName(
   messageId: string,
   messageType: string,
