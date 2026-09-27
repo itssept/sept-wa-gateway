@@ -19,7 +19,7 @@ import type { Shopper } from "../domain/types.ts";
 import { clientQuery, mediaLabel, paPrompt } from "./groupRelay.ts";
 import { formatClientEnvelope } from "../promptql/clientEnvelope.ts";
 import { phoneE164FromJid, maskJid, nowIso } from "../util.ts";
-import { buildWelcomeReply } from "../domain/welcomeMessage.ts";
+import { isPureGreeting, OPERATOR_WELCOME_PROMPT } from "../domain/welcomeMessage.ts";
 
 export interface RoutingDeps {
   settings: GatewaySettingsRepo;
@@ -403,14 +403,8 @@ export class InboundRouter {
         rawQuery = validMessages.map((m) => promptQlQuery(m)!).join("\n");
       }
 
-      let queryToSend = rawQuery;
-      let isWelcomeDispatch = false;
-
-      if (isFirstOperatorDM) {
-        const welcome = buildWelcomeReply(dest.owner?.name ?? "Operator", rawQuery);
-        queryToSend = welcome.prompt;
-        isWelcomeDispatch = true;
-      }
+      const isGreetingFirstDM = isFirstOperatorDM && isPureGreeting(rawQuery);
+      const isRequestFirstDM = isFirstOperatorDM && !isGreetingFirstDM;
 
       // Collect all ready media files across all messages in the batch into files array
       const files: PromptQlFileInput[] = [];
@@ -424,8 +418,8 @@ export class InboundRouter {
       try {
         ask = await this.submit(
           firstMsg, dest, identity,
-          queryToSend,
-          shopperTrigger ? "force_respond" : "force_skip", files, true, firstMsg.messageId,
+          rawQuery,
+          (shopperTrigger && !isGreetingFirstDM) ? "force_respond" : "force_skip", files, true, firstMsg.messageId,
         );
         for (const m of validMessages) {
           this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
@@ -443,7 +437,7 @@ export class InboundRouter {
         ask = await this.submit(firstMsg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
       }
 
-      if ((!shopperTrigger && !paTrigger) || !this.available(firstMsg, epoch)) {
+      if ((!shopperTrigger && !paTrigger && !isGreetingFirstDM) || !this.available(firstMsg, epoch)) {
         for (const { msg, token } of claimedTokens) {
           this.outboundLog.markRelayed(msg.connectionId, msg.messageId, token, msg.chatJid);
         }
@@ -473,19 +467,34 @@ export class InboundRouter {
         }
       }
 
-      void this.dispatcher.dispatch({
-        workflowId: workflow.id,
-        connectionId: firstMsg.connectionId,
-        chatJid: firstMsg.chatJid,
-        shopperId: responseIdentity.shopperId,
-        credentialRole: responseIdentity.role,
-        idempotencyKey: primaryClaim.msg.messageId,
-        claimToken: primaryClaim.token,
-        threadId: ask.threadId,
-        threadEventId: ask.threadEventId,
-        pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
-        isWelcomeDispatch,
-      }).catch((err) => log.error("outbound dispatch failed", { err }));
+      if (isGreetingFirstDM) {
+        // Deterministic welcome reply for pure greeting first DM: bypass LLM waiting and send approved template directly
+        void this.dispatcher.dispatchDirectText({
+          workflowId: workflow.id,
+          connectionId: firstMsg.connectionId,
+          chatJid: firstMsg.chatJid,
+          shopperId: responseIdentity.shopperId,
+          idempotencyKey: primaryClaim.msg.messageId,
+          claimToken: primaryClaim.token,
+          text: OPERATOR_WELCOME_PROMPT,
+          isWelcomeDispatch: true,
+        }).catch((err) => log.error("direct welcome dispatch failed", { err }));
+      } else {
+        void this.dispatcher.dispatch({
+          workflowId: workflow.id,
+          connectionId: firstMsg.connectionId,
+          chatJid: firstMsg.chatJid,
+          shopperId: responseIdentity.shopperId,
+          credentialRole: responseIdentity.role,
+          idempotencyKey: primaryClaim.msg.messageId,
+          claimToken: primaryClaim.token,
+          threadId: ask.threadId,
+          threadEventId: ask.threadEventId,
+          pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
+          isWelcomeDispatch: isRequestFirstDM,
+          welcomePrefix: isRequestFirstDM,
+        }).catch((err) => log.error("outbound dispatch failed", { err }));
+      }
     } catch (err) {
       for (const { msg, token } of claimedTokens) {
         this.outboundLog.markFailed(msg.connectionId, msg.messageId, token);
