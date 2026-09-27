@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   DealAndInvoiceManager,
   LockedInvoiceOverwriteError,
-  PaymentMismatchError,
   InvalidPaymentDetailsSourceError,
 } from "../src/modules/integrity/dealInvoiceIntegrity";
 
@@ -30,71 +29,79 @@ describe("Deal & Invoice Integrity Invariants", () => {
 
   test("TEST 1: Locked-Invoice Overwrite Protection (Chanel Tote cannot overwrite Mariam Birkin INV-20328)", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal(
-      "deal_mariam_birkin",
-      "client_mariam",
-      "Mariam",
-      {
+    manager.createDeal({
+      deal_id: "deal_mariam_birkin",
+      client_id: "client_mariam",
+      client_name: "Mariam",
+      item: {
         brand: "Hermès",
         model: "Birkin 25",
         colour: "Craie",
         material: "Togo",
-        hardware: "Gold Hardware (GHW)",
+        hardware: "Gold",
+        condition: "Store Fresh",
       },
-      33000.0,
-      29000.0,
-      "GBP"
-    );
+      sell_price: 33000.0,
+      cost_price: 29000.0,
+      currency: "GBP",
+    });
 
     const invoice = manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
     expect(invoice.is_locked).toBe(true);
     expect(invoice.amount).toBe(33000.0);
 
+    // Attempting to overwrite with Chanel Tote £7,800
     expect(() => {
-      manager.updateDealOrInvoice("deal_mariam_birkin", { brand: "Chanel", model: "Tote" }, 7800.0, false);
+      manager.updateDealOrInvoice("deal_mariam_birkin", {
+        new_item: { brand: "Chanel", model: "Deauville Tote" },
+        new_price: 7800.0,
+        is_operator_explicit: false,
+      });
     }).toThrow(LockedInvoiceOverwriteError);
   });
 
   test("TEST 2: Unassigned-Message Handling (Ambient message routes to unassigned state)", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal(
-      "deal_mariam_birkin",
-      "client_mariam",
-      "Mariam",
-      { brand: "Hermès", model: "Birkin 25" },
-      33000.0,
-      29000.0,
-      "GBP"
-    );
+    manager.createDeal({
+      deal_id: "deal_mariam_birkin",
+      client_id: "client_mariam",
+      client_name: "Mariam",
+      item: { brand: "Hermès", model: "Birkin 25" },
+      sell_price: 33000.0,
+      cost_price: 29000.0,
+      currency: "GBP",
+    });
     manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
 
     const ambientMsg = {
       deal_id: "deal_mariam_birkin",
       sender: "+447911123456",
       text: "Hey check out this Chanel tote for £7,800 in stock now",
-      extracted_data: { brand: "Chanel", model: "Tote", price: 7800 },
+      extracted_data: { brand: "Chanel", model: "Tote", price: 7800, currency: "GBP" },
     };
 
-    const result = manager.processIncomingMessage(ambientMsg);
-    expect(result.status).toBe("unassigned");
-    expect(manager.unassignedMessages.length).toBe(1);
-    expect(manager.unassignedMessages[0].status).toBe("pending_operator_confirmation");
+    const routing = manager.processIncomingMessage(ambientMsg);
+    expect(routing.status).toBe("unassigned");
+    expect(manager.getUnassignedMessages().length).toBe(1);
+    expect(routing.record.reason).toContain("locked");
   });
 
   test("TEST 3: Payment Verification Checked Against Stored Invoice", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal(
-      "deal_mariam_birkin",
-      "client_mariam",
-      "Mariam",
-      { brand: "Hermès", model: "Birkin 25" },
-      33000.0,
-      29000.0,
-      "GBP"
-    );
+    manager.createDeal({
+      deal_id: "deal_mariam_birkin",
+      client_id: "client_mariam",
+      client_name: "Mariam",
+      item: { brand: "Hermès", model: "Birkin 25" },
+      sell_price: 33000.0,
+      cost_price: 29000.0,
+      currency: "GBP",
+    });
     manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
 
     const mariamSwiftSlip = {
+      doc_type: "SWIFT MT103",
+      sender_name: "Mariam Al-Sabah",
       paid_amount: 33000.0,
       currency: "GBP",
       beneficiary_name: "Shrey Chettiar Luxury Concierge",
