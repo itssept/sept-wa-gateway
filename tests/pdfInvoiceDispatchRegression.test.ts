@@ -97,7 +97,7 @@ test("regression gw-01: download failure produces 'failed to send' notice and ne
 
   const rawBotResponse = `Here is your requested invoice.\n<artifact type="file" identifier="corrupted_invoice" />`;
 
-  let sentText: string | null = null;
+  let sentText: any = null;
   const dispatcher = new OutboundDispatcher(
     {
       waitForResponse: async () => ({
