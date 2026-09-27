@@ -117,6 +117,7 @@ rollout.
 | `WHATSAPP_MAX_PENDING_SENDS_PER_CONNECTION` | `100` | Backpressure bound. |
 | `WHATSAPP_GROUP_META_TTL_MS` | `3600000` | Group metadata cache TTL. |
 | `WHATSAPP_MAX_MEDIA_BYTES` | `7340032` | Raw-media limit, capped at 7 MiB. Media stays in memory only while `ask_promptql` accepts or retries the request. |
+| `WHATSAPP_INBOUND_DEBOUNCE_MS` | `5000` | Inbound message debounce buffer window in milliseconds (0–60000ms, default 5000ms). Buffers rapid multi-part messages per client into a single PromptQL turn. **Added latency**: Inbound messages wait up to the debounce window (5s by default) from the initial message before flushing to PromptQL. |
 | `WHATSAPP_MESSAGE_RETENTION_DAYS` | `90` | Retention window (purge job not yet wired). |
 | `RELAY_UNREGISTERED_CHATS` | `false` | Relay ownerless chats (unregistered DM sender, unqualified group) to the common room. Default drops them (audited as `inbound.rejected`, reason `unregistered_chat_relay_disabled`) until an enabled registered shopper qualifies the chat. Strict boolean. |
 | `PROMPTQL_MCP_AUTH_SCHEME` | `pat` | Auth scheme prefixed to the per-shopper token. |

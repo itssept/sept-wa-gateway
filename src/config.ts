@@ -96,6 +96,10 @@ const EnvSchema = z.object({
 
   WHATSAPP_HISTORY_JOIN_WAIT_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
 
+  // Inbound message debounce buffer window (ms).
+  // Buffers rapid inbound messages from the same client into a single turn.
+  WHATSAPP_INBOUND_DEBOUNCE_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
+
   // Retention.
   WHATSAPP_MESSAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
 
@@ -150,6 +154,7 @@ export interface Config {
   messageRetentionDays: number;
   captureGroupHistory: boolean;
   historyJoinWaitMs: number;
+  inboundDebounceMs: number;
   /** Relay ownerless (unregistered/unqualified) chats to the common room. */
   relayUnregisteredChats: boolean;
 
@@ -201,6 +206,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     messageRetentionDays: e.WHATSAPP_MESSAGE_RETENTION_DAYS,
     captureGroupHistory: e.WHATSAPP_CAPTURE_GROUP_HISTORY,
     historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
+    inboundDebounceMs: e.WHATSAPP_INBOUND_DEBOUNCE_MS,
     relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
 
     mcp: {

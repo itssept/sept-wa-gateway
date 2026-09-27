@@ -95,6 +95,7 @@ async function main(): Promise<void> {
       prepareHistory: (row) => connection.prepareHistoryMessage(row),
       reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),
       relayUnregisteredChats: config.relayUnregisteredChats,
+      inboundDebounceMs: config.inboundDebounceMs,
     },
   );
 

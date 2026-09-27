@@ -1,4 +1,3 @@
-/** Per-chat submission FIFO. Identity is per post; bot ownership is permanent. */
 import { z } from "zod";
 import type { InboundMessage, HistoryBatchEvent, RoutingGroup } from "../whatsapp/socket.ts";
 import type { SelfMembershipEvent } from "../whatsapp/groupEvents.ts";
@@ -18,10 +17,11 @@ import type { OutboundDispatcher } from "./outboundDispatcher.ts";
 import type { Logger } from "../logger.ts";
 import type { Shopper } from "../domain/types.ts";
 import { clientQuery, mediaLabel, paPrompt } from "./groupRelay.ts";
+import { formatClientEnvelope } from "../promptql/clientEnvelope.ts";
+import { phoneE164FromJid, maskJid, nowIso } from "../util.ts";
 import { buildWelcomeReply } from "../domain/welcomeMessage.ts";
-import { maskJid, phoneE164FromJid, nowIso } from "../util.ts";
 
-interface RoutingDeps {
+export interface RoutingDeps {
   settings: GatewaySettingsRepo;
   messages: MessageStore;
   welcomeLog?: WelcomeLogRepo;
@@ -34,6 +34,8 @@ interface RoutingDeps {
    *  room. Off by default: such chats are dropped (audited), never relayed,
    *  until an enabled registered shopper qualifies them. */
   relayUnregisteredChats?: boolean;
+  /** Inbound debouncing window in milliseconds (0 = disabled). */
+  inboundDebounceMs?: number;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -51,9 +53,24 @@ const MembershipSchema = z.object({
   addedByJid: z.string().nullish(),
 });
 
+interface InboundBufferEntry {
+  msg: InboundMessage;
+  epoch: number;
+}
+
+interface InboundBuffer {
+  items: InboundBufferEntry[];
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Resolves when this buffer has been processed/flushed. */
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
 export class InboundRouter {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly epochs = new Map<string, number>();
+  private readonly clientBuffers = new Map<string, InboundBuffer>();
 
   constructor(
     private readonly resolver: ShopperResolver,
@@ -69,6 +86,10 @@ export class InboundRouter {
 
   private key(connectionId: string, chatJid: string): string {
     return JSON.stringify([connectionId, chatJid]);
+  }
+
+  private bufferKey(connectionId: string, chatJid: string, senderKey: string): string {
+    return JSON.stringify([connectionId, chatJid, senderKey]);
   }
 
   onSelfMembership(event: SelfMembershipEvent, action: "add" | "remove" = "remove"): void {
@@ -90,9 +111,72 @@ export class InboundRouter {
   }
 
   handle(msg: InboundMessage): Promise<void> {
-    const key = this.key(msg.connectionId, msg.chatJid);
-    const epoch = this.epochs.get(key) ?? 0;
-    return this.enqueue(key, () => this.process(msg, epoch));
+    const chatKey = this.key(msg.connectionId, msg.chatJid);
+    const epoch = this.epochs.get(chatKey) ?? 0;
+    const debounceMs = this.deps.inboundDebounceMs ?? 0;
+
+    // Direct bypass if debouncing is disabled (0ms) or message is from gateway itself
+    if (debounceMs <= 0 || (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId))) {
+      return this.enqueue(chatKey, () => this.processBatch([msg], epoch));
+    }
+
+    const senderKey = msg.senderPhoneE164 ?? msg.senderJid;
+    const bufKey = this.bufferKey(msg.connectionId, msg.chatJid, senderKey);
+
+    let buf = this.clientBuffers.get(bufKey);
+    if (!buf) {
+      let resolvePromise!: () => void;
+      let rejectPromise!: (err: unknown) => void;
+      const promise = new Promise<void>((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
+      });
+
+      buf = {
+        items: [{ msg, epoch }],
+        timer: null,
+        promise,
+        resolve: resolvePromise,
+        reject: rejectPromise,
+      };
+
+      buf.timer = setTimeout(() => {
+        this.flushBuffer(bufKey);
+      }, debounceMs);
+
+      this.clientBuffers.set(bufKey, buf);
+      return buf.promise;
+    }
+
+    // Append to existing buffer and reset debounce timer
+    buf.items.push({ msg, epoch });
+    if (buf.timer) clearTimeout(buf.timer);
+    buf.timer = setTimeout(() => {
+      this.flushBuffer(bufKey);
+    }, debounceMs);
+
+    return buf.promise;
+  }
+
+  private flushBuffer(bufKey: string): void {
+    const buf = this.clientBuffers.get(bufKey);
+    if (!buf) return;
+    this.clientBuffers.delete(bufKey);
+    if (buf.timer) {
+      clearTimeout(buf.timer);
+      buf.timer = null;
+    }
+
+    const messages = buf.items.map((i) => i.msg);
+    const lastEpoch = buf.items[buf.items.length - 1].epoch;
+    const firstMsg = messages[0];
+    const chatKey = this.key(firstMsg.connectionId, firstMsg.chatJid);
+
+    void this.enqueue(chatKey, () => this.processBatch(messages, lastEpoch))
+      .then(() => buf.resolve())
+      .catch((err) => {
+        buf.reject(err);
+      });
   }
 
   private available(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">, epoch: number): boolean {
@@ -155,7 +239,7 @@ export class InboundRouter {
     const fixed = existing?.shopperId ? existing : null;
     const ownerId = fixed?.shopperId ?? candidate?.id ?? null;
     const owner = fixed ? this.resolver.byId(ownerId) : candidate;
-    const roomName = fixed?.roomName ?? candidate?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
+    const roomName = fixed?.roomName ?? owner?.roomName ?? existing?.roomName ?? this.deps.settings.getCommonRoomName();
     if (!roomName) { this.clientReady(msg.connectionId, msg.chatJid); return null; }
     if (ownerId === null && !this.unregisteredAllowed(msg.connectionId, msg.chatJid)) return null;
     return { owner, ownerId, roomName, qualified: false };
@@ -234,34 +318,85 @@ export class InboundRouter {
     );
   }
 
-  private async process(msg: InboundMessage, epoch: number): Promise<void> {
-    let claimToken: string | null = null;
-    const log = this.log.child({ corrId: msg.messageId, chatJid: maskJid(msg.chatJid) });
+  private formatBatchClientEnvelope(messages: InboundMessage[]): string {
+    const first = messages[0];
+    const textParts: string[] = [];
+
+    for (const m of messages) {
+      if (m.text.trim()) {
+        textParts.push(m.text);
+      } else {
+        const media = mediaLabel(m);
+        if (media) {
+          const fileName = media.fileName?.replace(/[\r\n\u2028\u2029]/g, " ").trim();
+          const desc = media.kind === "document" && fileName ? `(document: ${fileName})` : `(${media.kind})`;
+          textParts.push(desc);
+        }
+      }
+    }
+
+    const mergedText = textParts.join("\n");
+    return formatClientEnvelope({
+      displayName: first.pushName,
+      phoneE164: first.senderPhoneE164,
+      lid: first.senderJid.endsWith("@lid") ? first.senderJid : null,
+      text: mergedText,
+      media: null,
+    });
+  }
+
+  private async processBatch(messages: InboundMessage[], epoch: number): Promise<void> {
+    if (!messages.length) return;
+    const firstMsg = messages[0];
+    const lastMsg = messages[messages.length - 1];
+    const log = this.log.child({ corrId: firstMsg.messageId, chatJid: maskJid(firstMsg.chatJid), batchSize: messages.length });
+
+    const claimedTokens: { msg: InboundMessage; token: string }[] = [];
     try {
-      if (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId)) return;
-      if (!this.available(msg, epoch) || !promptQlQuery(msg)) return;
-      const dest = await this.destination(msg);
-      if (!dest || !this.available(msg, epoch)) return;
-      const identity = this.identity(msg, dest);
-      if (identity.role === "client" && !this.clientReady(msg.connectionId, msg.chatJid)) return;
+      if (firstMsg.fromMe && this.outboundLog.isGatewayMessage(firstMsg.connectionId, firstMsg.chatJid, firstMsg.messageId)) return;
+      if (!this.available(firstMsg, epoch)) return;
 
-      await this.retryPending(msg, dest);
-      const claim = this.outboundLog.claim(msg.connectionId, msg.messageId);
-      if (claim.status !== "claimed") return;
-      claimToken = claim.token;
-      if (!this.available(msg, epoch)) throw new Error("Group membership changed");
+      const validMessages = messages.filter((m) => Boolean(promptQlQuery(m)));
+      if (!validMessages.length) return;
 
-      const shopperTrigger = !msg.fromMe && identity.role === "shopper" && (!msg.isGroup || msg.mentionsSelf);
-      const paTrigger = !msg.fromMe && msg.isGroup && dest.qualified && msg.mentionsSelf &&
-        identity.role === "client" && dest.owner?.status === "enabled";
+      const dest = await this.destination(firstMsg);
+      if (!dest || !this.available(firstMsg, epoch)) return;
+      const identity = this.identity(firstMsg, dest);
+      if (identity.role === "client" && !this.clientReady(firstMsg.connectionId, firstMsg.chatJid)) return;
+
+      await this.retryPending(firstMsg, dest);
+
+      for (const m of validMessages) {
+        const claim = this.outboundLog.claim(m.connectionId, m.messageId);
+        if (claim.status === "claimed") {
+          claimedTokens.push({ msg: m, token: claim.token });
+        }
+      }
+      if (!claimedTokens.length) return;
+      if (!this.available(firstMsg, epoch)) throw new Error("Group membership changed");
+
+      // Check triggers across all messages in the batch
+      const shopperTrigger = validMessages.some((m) =>
+        !m.fromMe && identity.role === "shopper" && (!m.isGroup || m.mentionsSelf)
+      );
+      const paTrigger = validMessages.some((m) =>
+        !m.fromMe && m.isGroup && dest.qualified && m.mentionsSelf &&
+        identity.role === "client" && dest.owner?.status === "enabled"
+      );
 
       // Welcome message evaluation (Room 13):
       // Trigger: Registered operator's first inbound 1:1 direct message (never in groups).
-      const isOperatorDM = !msg.fromMe && !msg.isGroup && identity.role === "shopper";
+      const isOperatorDM = !firstMsg.fromMe && !firstMsg.isGroup && identity.role === "shopper";
       const isFirstOperatorDM = isOperatorDM &&
-        Boolean(this.deps.welcomeLog && !this.deps.welcomeLog.isWelcomeSent(identity.shopperId, msg.connectionId));
+        Boolean(this.deps.welcomeLog && !this.deps.welcomeLog.isWelcomeSent(identity.shopperId, firstMsg.connectionId));
 
-      const rawQuery = identity.role === "client" ? clientQuery(msg) : promptQlQuery(msg)!;
+      let rawQuery: string;
+      if (identity.role === "client") {
+        rawQuery = this.formatBatchClientEnvelope(validMessages);
+      } else {
+        rawQuery = validMessages.map((m) => promptQlQuery(m)!).join("\n");
+      }
+
       let queryToSend = rawQuery;
       let isWelcomeDispatch = false;
 
@@ -271,50 +406,89 @@ export class InboundRouter {
         isWelcomeDispatch = true;
       }
 
-      const files = msg.mediaStatus === "ready" && msg.media
-        ? [promptQlFileFromMedia(msg.media, mediaFileName(msg.messageId, msg.msgType, msg.media.mime ?? null))]
-        : [];
+      const files: PromptQlFileInput[] = [];
+      for (const m of validMessages) {
+        if (m.mediaStatus === "ready" && m.media) {
+          files.push(promptQlFileFromMedia(m.media, mediaFileName(m.messageId, m.msgType, m.media.mime ?? null)));
+          if (files.length >= 1) break; // PromptQL MCP ask tool accepts max 1 file attachment per turn
+        }
+      }
+
       let ask: AskResult;
       try {
-        ask = await this.submit(msg, dest, identity,
+        ask = await this.submit(
+          firstMsg, dest, identity,
           queryToSend,
-          shopperTrigger ? "force_respond" : "force_skip", files, true, msg.messageId);
-        this.deps.messages.markRelayed(msg.connectionId, msg.chatJid, msg.messageId);
+          shopperTrigger ? "force_respond" : "force_skip", files, true, firstMsg.messageId,
+        );
+        for (const m of validMessages) {
+          this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
+        }
       } finally {
-        msg.media = null;
+        for (const m of validMessages) {
+          m.media = null;
+        }
         files.length = 0;
       }
 
       let responseIdentity = identity;
-      if (paTrigger && this.available(msg, epoch)) {
+      if (paTrigger && this.available(firstMsg, epoch)) {
         responseIdentity = { role: "pa", shopperId: dest.owner!.id };
-        ask = await this.submit(msg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
+        ask = await this.submit(firstMsg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
       }
-      if ((!shopperTrigger && !paTrigger) || !this.available(msg, epoch)) {
-        this.outboundLog.markRelayed(msg.connectionId, msg.messageId, claim.token, msg.chatJid);
+
+      if ((!shopperTrigger && !paTrigger) || !this.available(firstMsg, epoch)) {
+        for (const { msg, token } of claimedTokens) {
+          this.outboundLog.markRelayed(msg.connectionId, msg.messageId, token, msg.chatJid);
+        }
         return;
       }
+
       if (responseIdentity.role === "client") return;
-      // Relayed to PromptQL with the agent on: acknowledge on the user's message
-      // so they know a reply is coming, before the (possibly long) response wait.
-      this.ackAgent(msg);
+
+      // Relayed to PromptQL with the agent on: acknowledge on the triggering message(s)
+      const triggeringMsg = validMessages.slice().reverse().find((m) => m.mentionsSelf) ?? lastMsg;
+      this.ackAgent(triggeringMsg);
+
       const workflow = this.workflows.create({
-        connectionId: msg.connectionId, chatJid: msg.chatJid,
-        shopperId: responseIdentity.shopperId, inboundMessageId: msg.messageId, remoteRef: ask.threadId,
+        connectionId: firstMsg.connectionId,
+        chatJid: firstMsg.chatJid,
+        shopperId: responseIdentity.shopperId,
+        inboundMessageId: triggeringMsg.messageId,
+        remoteRef: ask.threadId,
       });
+
+      const primaryClaim = claimedTokens.find((c) => c.msg.messageId === triggeringMsg.messageId) ?? claimedTokens[claimedTokens.length - 1];
+
+      // Mark other messages in batch as relayed in outboundLog
+      for (const { msg, token } of claimedTokens) {
+        if (msg.messageId !== primaryClaim.msg.messageId) {
+          this.outboundLog.markRelayed(msg.connectionId, msg.messageId, token, msg.chatJid);
+        }
+      }
+
       void this.dispatcher.dispatch({
-        workflowId: workflow.id, connectionId: msg.connectionId, chatJid: msg.chatJid,
-        shopperId: responseIdentity.shopperId, credentialRole: responseIdentity.role,
-        idempotencyKey: msg.messageId, claimToken: claim.token,
-        threadId: ask.threadId, threadEventId: ask.threadEventId,
+        workflowId: workflow.id,
+        connectionId: firstMsg.connectionId,
+        chatJid: firstMsg.chatJid,
+        shopperId: responseIdentity.shopperId,
+        credentialRole: responseIdentity.role,
+        idempotencyKey: primaryClaim.msg.messageId,
+        claimToken: primaryClaim.token,
+        threadId: ask.threadId,
+        threadEventId: ask.threadEventId,
         pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
         isWelcomeDispatch,
       }).catch((err) => log.error("outbound dispatch failed", { err }));
     } catch (err) {
-      if (claimToken) this.outboundLog.markFailed(msg.connectionId, msg.messageId, claimToken);
-      log.error("inbound error", { err });
+      for (const { msg, token } of claimedTokens) {
+        this.outboundLog.markFailed(msg.connectionId, msg.messageId, token);
+      }
+      log.error("inbound batch error", { err });
     } finally {
-      msg.media = null;
+      for (const m of messages) {
+        m.media = null;
+      }
     }
   }
 
@@ -361,14 +535,13 @@ export class InboundRouter {
           }
         }
         if (this.available(msg, epoch)) await this.submit(msg, dest, CLIENT, "End of history", "force_skip", [], false);
-      } catch {
-        this.log.warn("history bracket relay failed", { chatJid: maskJid(msg.chatJid) });
+      } catch (err) {
+        this.log.warn("history batch replay failed", { chatJid: maskJid(parsed.groupJid), err });
       }
     });
   }
 }
 
-/** Shopper text is unchanged. Media without a caption gets only its kind. */
 export function promptQlQuery(msg: InboundMessage, _attached = false): string | null {
   if (msg.text.trim()) return msg.text;
   const media = mediaLabel(msg);
