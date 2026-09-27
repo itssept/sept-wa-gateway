@@ -3,20 +3,23 @@
  * 
  * Rules:
  * - Approved structure:
- *   "Hi, this is SEPT. I can help you with:
- *   • Finding and matching items across client requests and sourcers
- *   • Sourcing updates and price checks
- *   • Generating invoices and client offers
- *   • Tracking orders and deal status
+ *   "Hi, this is SEPT.
+ *   I help you sell luxury — in the chats you already use.
+ *   I can:
+ *   * Remember pieces as they come in
+ *   * Match what’s available to the right clients
+ *   * Remember requests, sizes, prices, and open deals
+ *   * Track client shipments
+ *   * Draft messages in your voice, for your approval
+ *   * Prep invoices and payment summaries
  * 
- *   Important notes:
- *   1. I can only see and help with conversations I've been added to. Please add me to your sourcer groups and client chats.
- *   2. If anything goes wrong, text Yara with a screenshot of the issue.
+ *   I only see conversations I’m added to. Add me to the chats where you buy, sell, and talk to clients.
  * 
- *   How can I help you?"
+ *   How can I help?"
  * 
- * - If the first DM contains a real request (not just a greeting like 'hi', 'hello'),
- *   send the welcome message first, then handle the request in the same response or immediately after.
+ * - If the first DM is a pure greeting ('hi', 'hello'), SEPT delivers the welcome message alone.
+ * - If the first DM contains a real request, SEPT delivers the welcome message header,
+ *   followed by the handled request response.
  */
 
 export const OPERATOR_WELCOME_BASE = `Hi, this is SEPT.
@@ -52,24 +55,4 @@ export function isPureGreeting(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   return GREETING_REGEX.test(trimmed);
-}
-
-/**
- * Formats the welcome reply.
- * If the user asked a real request, combines the welcome greeting with the request handling prompt.
- */
-export function buildWelcomeReply(_operatorName: string, userText: string): { isGreeting: boolean; prompt: string; prefixText: string } {
-  const greeting = isPureGreeting(userText);
-  if (greeting) {
-    return {
-      isGreeting: true,
-      prefixText: OPERATOR_WELCOME_PROMPT,
-      prompt: OPERATOR_WELCOME_PROMPT,
-    };
-  }
-  return {
-    isGreeting: false,
-    prefixText: OPERATOR_WELCOME_BASE,
-    prompt: `${OPERATOR_WELCOME_BASE}\n\n---\nOperator Request:\n${userText}`,
-  };
 }
