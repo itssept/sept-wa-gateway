@@ -29,11 +29,11 @@ describe("Deal & Invoice Integrity Invariants", () => {
 
   test("TEST 1: Locked-Invoice Overwrite Protection (Chanel Tote cannot overwrite Mariam Birkin INV-20328)", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal({
-      deal_id: "deal_mariam_birkin",
-      client_id: "client_mariam",
-      client_name: "Mariam",
-      item: {
+    manager.createDeal(
+      "deal_mariam_birkin",
+      "client_mariam",
+      "Mariam",
+      {
         brand: "Hermès",
         model: "Birkin 25",
         colour: "Craie",
@@ -41,10 +41,10 @@ describe("Deal & Invoice Integrity Invariants", () => {
         hardware: "Gold",
         condition: "Store Fresh",
       },
-      sell_price: 33000.0,
-      cost_price: 29000.0,
-      currency: "GBP",
-    });
+      33000.0,
+      29000.0,
+      "GBP"
+    );
 
     const invoice = manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
     expect(invoice.is_locked).toBe(true);
@@ -52,25 +52,26 @@ describe("Deal & Invoice Integrity Invariants", () => {
 
     // Attempting to overwrite with Chanel Tote £7,800
     expect(() => {
-      manager.updateDealOrInvoice("deal_mariam_birkin", {
-        new_item: { brand: "Chanel", model: "Deauville Tote" },
-        new_price: 7800.0,
-        is_operator_explicit: false,
-      });
+      manager.updateDealOrInvoice(
+        "deal_mariam_birkin",
+        { brand: "Chanel", model: "Deauville Tote" },
+        7800.0,
+        false
+      );
     }).toThrow(LockedInvoiceOverwriteError);
   });
 
   test("TEST 2: Unassigned-Message Handling (Ambient message routes to unassigned state)", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal({
-      deal_id: "deal_mariam_birkin",
-      client_id: "client_mariam",
-      client_name: "Mariam",
-      item: { brand: "Hermès", model: "Birkin 25" },
-      sell_price: 33000.0,
-      cost_price: 29000.0,
-      currency: "GBP",
-    });
+    manager.createDeal(
+      "deal_mariam_birkin",
+      "client_mariam",
+      "Mariam",
+      { brand: "Hermès", model: "Birkin 25" },
+      33000.0,
+      29000.0,
+      "GBP"
+    );
     manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
 
     const ambientMsg = {
@@ -82,21 +83,21 @@ describe("Deal & Invoice Integrity Invariants", () => {
 
     const routing = manager.processIncomingMessage(ambientMsg);
     expect(routing.status).toBe("unassigned");
-    expect(manager.getUnassignedMessages().length).toBe(1);
-    expect(routing.record.reason).toContain("locked");
+    expect(manager.unassignedMessages.length).toBe(1);
+    expect(routing.record?.reason).toContain("locked");
   });
 
   test("TEST 3: Payment Verification Checked Against Stored Invoice", () => {
     const manager = new DealAndInvoiceManager(shreyProfile);
-    manager.createDeal({
-      deal_id: "deal_mariam_birkin",
-      client_id: "client_mariam",
-      client_name: "Mariam",
-      item: { brand: "Hermès", model: "Birkin 25" },
-      sell_price: 33000.0,
-      cost_price: 29000.0,
-      currency: "GBP",
-    });
+    manager.createDeal(
+      "deal_mariam_birkin",
+      "client_mariam",
+      "Mariam",
+      { brand: "Hermès", model: "Birkin 25" },
+      33000.0,
+      29000.0,
+      "GBP"
+    );
     manager.generateAndLockInvoice("deal_mariam_birkin", "INV-20328");
 
     const mariamSwiftSlip = {
