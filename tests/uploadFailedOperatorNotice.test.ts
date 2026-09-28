@@ -1,0 +1,144 @@
+import { expect, test, afterEach } from "bun:test";
+import { makeTestApp } from "./helpers.ts";
+import { InboundRouter } from "../src/routing/inboundRouter.ts";
+import { AskSubmissionError, type PostingIdentity } from "../src/promptql/promptqlAdapter.ts";
+import { sanitizeOutboundText } from "../src/routing/sanitizer.ts";
+import type { InboundMessage } from "../src/whatsapp/socket.ts";
+
+type App = ReturnType<typeof makeTestApp> & {
+  calls: Array<{ identity: PostingIdentity; input: any }>;
+  notices: Array<{ connectionId: string; chatJid: string; text: string }>;
+  router: InboundRouter;
+  a: any;
+};
+
+const apps: App[] = [];
+
+afterEach(() => {
+  for (const app of apps.splice(0)) app.db.close();
+});
+
+function setup(opts: { failTimes?: number; status?: "upload_failed" | "sent_message_failed" } = {}): App {
+  const app = makeTestApp();
+  const { ctx } = app;
+  ctx.gatewaySettings.set("client-token", "common-room");
+  const a = ctx.shoppers.register("Yara", "+97336663062", "operator-yara-aldhaen").shopper;
+  ctx.credentials.setActive(a.id, `shopper-${a.id}`);
+
+  let failsLeft = opts.failTimes ?? 1;
+  const status = opts.status ?? "upload_failed";
+  const calls: Array<{ identity: PostingIdentity; input: any }> = [];
+  const notices: Array<{ connectionId: string; chatJid: string; text: string }> = [];
+
+  const adapter = {
+    ask: async (identity: PostingIdentity, input: any) => {
+      calls.push({ identity, input: structuredClone(input) });
+      if (failsLeft > 0) {
+        failsLeft -= 1;
+        throw new AskSubmissionError(status, { threadId: "partial-bot", threadEventId: null });
+      }
+      return { threadId: "ok-bot", threadEventId: "evt-1" };
+    },
+  };
+
+  const router = new InboundRouter(
+    ctx.resolver,
+    adapter as never,
+    ctx.workflows,
+    ctx.chatBots,
+    ctx.outboundLog,
+    {
+      dispatch: async () => undefined,
+      dispatchDirectText: async () => undefined,
+      notifyChat: async (input: { connectionId: string; chatJid: string; text: string }) => {
+        notices.push(input);
+      },
+    } as never,
+    ctx.audit,
+    ctx.log,
+    {
+      settings: ctx.gatewaySettings,
+      messages: ctx.messages,
+      getGroup: async () => null,
+      prepareHistory: async () => null,
+      reactToMessage: async () => undefined,
+      relayUnregisteredChats: true,
+      inboundDebounceMs: 0,
+    },
+  );
+
+  const res = { ...app, a, calls, notices, router };
+  apps.push(res);
+  return res;
+}
+
+function imageMsg(id: string): InboundMessage {
+  return {
+    connectionId: "test-conn",
+    chatJid: "97336663062@s.whatsapp.net",
+    senderJid: "97336663062@s.whatsapp.net",
+    senderPhoneE164: "+97336663062",
+    pushName: "Yara",
+    messageId: id,
+    ts: Date.now(),
+    text: "",
+    msgType: "image",
+    mediaStatus: "ready",
+    media: { bytes: Buffer.from("fake-dior"), mime: "image/jpeg", sizeBytes: 9 },
+    isGroup: false,
+    fromMe: false,
+    mentionsSelf: false,
+  };
+}
+
+const DM = "97336663062@s.whatsapp.net";
+
+test("upload_failed once then success: retries and does not notify", async () => {
+  const app = setup({ failTimes: 1 });
+  await app.router.handle(imageMsg("img-1"));
+  expect(app.calls).toHaveLength(2);
+  expect(app.calls[1]!.input.files).toHaveLength(1);
+  expect(app.calls[1]!.input.threadId).toBe("partial-bot");
+  expect(app.notices).toHaveLength(0);
+  expect(app.ctx.chatBots.pendingPost("test-conn", DM)).toBeNull();
+});
+
+test("upload_failed twice: notifies operator to resend", async () => {
+  const app = setup({ failTimes: 2 });
+  await app.router.handle(imageMsg("img-2"));
+  expect(app.calls).toHaveLength(2);
+  expect(app.notices).toHaveLength(1);
+  expect(app.notices[0].text).toContain("couldn't upload");
+  expect(app.notices[0].text.toLowerCase()).toContain("resend");
+  expect(app.ctx.chatBots.pendingPost("test-conn", DM)?.query).toBe("(image)");
+});
+
+test("sent_message_failed on media notifies once without a second upload", async () => {
+  const app = setup({ failTimes: 5, status: "sent_message_failed" });
+  await app.router.handle(imageMsg("img-3"));
+  expect(app.calls).toHaveLength(1);
+  expect(app.notices).toHaveLength(1);
+  expect(app.notices[0].text.toLowerCase()).toContain("resend");
+});
+
+test("operator resend notices survive outbound sanitizer", () => {
+  for (const notice of [
+    "Got your photo, but I couldn't upload it just now. Please resend it once and I'll pick it up.",
+    "I hit a snag sending that to my workspace. Please resend and I'll try again.",
+  ]) {
+    expect(sanitizeOutboundText(notice).trim()).toBe(notice);
+  }
+});
+
+test("text upload_failed does not retry or notify", async () => {
+  const app = setup({ failTimes: 2 });
+  await app.router.handle({
+    ...imageMsg("img-4"),
+    text: "hello",
+    msgType: "text",
+    mediaStatus: "none",
+    media: null,
+  });
+  expect(app.calls).toHaveLength(1);
+  expect(app.notices).toHaveLength(0);
+});

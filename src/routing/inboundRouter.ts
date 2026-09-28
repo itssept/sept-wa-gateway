@@ -358,6 +358,7 @@ export class InboundRouter {
     const log = this.log.child({ corrId: firstMsg.messageId, chatJid: maskJid(firstMsg.chatJid), batchSize: messages.length });
 
     const claimedTokens: { msg: InboundMessage; token: string }[] = [];
+    let shopperMediaAsk = false;
     try {
       if (firstMsg.fromMe && this.outboundLog.isGatewayMessage(firstMsg.connectionId, firstMsg.chatJid, firstMsg.messageId)) return;
       if (!this.available(firstMsg, epoch)) return;
@@ -413,14 +414,34 @@ export class InboundRouter {
           files.push(promptQlFileFromMedia(m.media, mediaFileName(m.messageId, m.msgType, m.media.mime ?? null)));
         }
       }
+      const hadReadyMedia = files.length > 0;
+      shopperMediaAsk = identity.role === "shopper" && hadReadyMedia && !firstMsg.fromMe;
+      const agentResponse = (shopperTrigger && !isGreetingFirstDM) ? "force_respond" as const : "force_skip" as const;
 
       let ask: AskResult;
       try {
-        ask = await this.submit(
-          firstMsg, dest, identity,
-          rawQuery,
-          (shopperTrigger && !isGreetingFirstDM) ? "force_respond" : "force_skip", files, true, firstMsg.messageId,
-        );
+        try {
+          ask = await this.submit(
+            firstMsg, dest, identity,
+            rawQuery,
+            agentResponse, files, true, firstMsg.messageId,
+          );
+        } catch (err) {
+          // Live 2026-09-28: a bare image ask failed once with upload_failed and
+          // left WhatsApp silent. Retry the same payload once before a notice.
+          if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || !hadReadyMedia) {
+            throw err;
+          }
+          log.warn("ask upload_failed; retrying once", { status: err.status, fileCount: files.length });
+          ask = await this.submit(
+            firstMsg, dest, identity,
+            rawQuery,
+            agentResponse, files, true, firstMsg.messageId,
+          );
+          // The failed attempt stored encrypted pending text for the next
+          // message. This retry was accepted, so that recovery must not replay.
+          this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
+        }
         for (const m of validMessages) {
           this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
         }
@@ -500,6 +521,24 @@ export class InboundRouter {
         this.outboundLog.markFailed(msg.connectionId, msg.messageId, token);
       }
       log.error("inbound batch error", { err });
+      // Do not leave operators in total silence when PromptQL rejects media upload.
+      if (
+        shopperMediaAsk &&
+        err instanceof AskSubmissionError &&
+        (err.status === "upload_failed" || err.status === "sent_message_failed")
+      ) {
+        const notice = err.status === "upload_failed"
+          ? "Got your photo, but I couldn't upload it just now. Please resend it once and I'll pick it up."
+          : "I hit a snag sending that to my workspace. Please resend and I'll try again.";
+        // Best-effort. A missing or throwing notifier must not reject the batch.
+        void Promise.resolve()
+          .then(() => this.dispatcher.notifyChat({
+            connectionId: firstMsg.connectionId,
+            chatJid: firstMsg.chatJid,
+            text: notice,
+          }))
+          .catch((notifyErr) => log.warn("upload-failure notice failed", { err: notifyErr }));
+      }
     } finally {
       for (const m of messages) {
         m.media = null;

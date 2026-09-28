@@ -216,10 +216,13 @@ test("partial promoted bot creation persists new ownership and retries text with
   expect(app.ctx.chatBots.get("test-conn", PN)).toMatchObject({
     shopperId: shopper.id, threadId: "shopper-partial", roomName: shopper.roomName,
   });
+  expect(app.calls[1]!.input.files).toHaveLength(1);
+  expect(app.calls[2]!.input).toMatchObject({ threadId: "shopper-partial" });
+  expect(app.calls[2]!.input.files).toHaveLength(1);
   app.setAskHook();
   await app.router.handle(dm());
-  expect(app.calls[2]!.input).toMatchObject({ threadId: "shopper-partial", agentResponse: "force_skip", files: [] });
-  expect(app.calls[3]!.input.threadId).toBe("shopper-partial");
+  expect(app.calls[3]!.input).toMatchObject({ threadId: "shopper-partial", agentResponse: "force_skip", files: [] });
+  expect(app.calls[4]!.input.threadId).toBe("shopper-partial");
   expect(app.ctx.chatBots.pendingPost("test-conn", PN)).toBeNull();
   expect(app.dispatches).toHaveLength(1);
 });
