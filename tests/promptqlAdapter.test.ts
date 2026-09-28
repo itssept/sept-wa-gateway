@@ -413,12 +413,8 @@ test("resolveArtifacts downloads by the response's artifact_reference id + versi
   expect(toolCalls[0]!.name).toBe("download_promptql_artifact");
   expect(toolCalls[0]!.args).toEqual({ artifact_id: "aid-1", version: 3 });
   expect(out).toHaveLength(1);
-  expect(out[0]!.ok).toBe(true);
-  const art = out[0]!.ok ? out[0]!.artifact : null;
-  expect(art!.identifier).toBe("sales");
-  // MIME comes from the resource block, not a type guess.
-  expect(art!.mimeType).toBe("application/json");
-  expect(art!.bytes.toString("utf8")).toBe(JSON.stringify([{ a: 1 }], null, 2));
+  // application/json is never a WhatsApp document (invoice sidecar regression).
+  expect(out[0]).toEqual({ ok: false, identifier: "sales", reason: "not_attachable" });
 });
 
 test("resolveArtifacts sends version 0 (zero-based) and unwraps a plain text block", async () => {

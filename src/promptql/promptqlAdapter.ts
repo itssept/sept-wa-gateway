@@ -82,7 +82,7 @@ export interface ResolvedArtifact {
 
 /** Why a referenced artifact could not be attached. The caller surfaces this to
  *  the user as a short note; keep the set small so wording stays consistent. */
-export type ArtifactFailureReason = "too_large" | "unavailable";
+export type ArtifactFailureReason = "too_large" | "unavailable" | "not_attachable";
 
 /** The per-reference outcome of resolveArtifacts: either sendable bytes or a
  *  reason the artifact was dropped. Order matches the referenced order. */
@@ -517,12 +517,29 @@ export class PromptQlAdapter {
       });
       return { reason: "too_large" };
     }
-    const resolvedMime = extracted.mime ?? mimeForType(type) ?? "application/octet-stream";
+    let resolvedMime = extracted.mime ?? mimeForType(type) ?? "application/octet-stream";
+    // Magic-byte sniff: PromptQL sometimes labels a real PDF as text/json.
+    if (looksLikePdf(bytes)) resolvedMime = "application/pdf";
+
+    // Never relay json/md/html as WhatsApp documents — live regression
+    // 2026-09-28 sent artifact-invoice_*.json + *.md. Also skip invoice-like
+    // text/plain dumps (markdown invoices mislabeled as text).
+    const mimeBase = resolvedMime.split(";")[0]!.trim().toLowerCase();
+    const invoiceTextDump = isInvoiceArtifactRef(ref.identifier, title) && mimeBase === "text/plain";
+    if (!isWhatsAppAttachableMime(resolvedMime) || invoiceTextDump) {
+      this.log.warn("artifact skipped (not WhatsApp-attachable)", {
+        identifier: maskArtifact(ref.identifier),
+        mimeType: resolvedMime,
+        type,
+      });
+      return { reason: "not_attachable" };
+    }
+
     return {
       artifact: {
         identifier: ref.identifier,
         title,
-        fileName: artifactFileName(ref.identifier, type, resolvedMime),
+        fileName: artifactFileName(ref.identifier, type, resolvedMime, title),
         mimeType: resolvedMime,
         bytes,
       },
@@ -588,11 +605,124 @@ const MIME_EXT: Record<string, string> = {
   "application/pdf": ".pdf",
 };
 
+/** MIME types that must never become WhatsApp documents (live invoice regression). */
+const WHATSAPP_BLOCKED_MIME = new Set([
+  "application/json",
+  "text/markdown",
+  "text/x-markdown",
+  "text/html",
+  "application/xhtml+xml",
+]);
+
+/** PromptQL artifact_type values that must never become WA documents via the
+ *  permalink fallback selector. Explicit <artifact type="text"> tags still go
+ *  through decodeArtifact and may attach as text/plain. */
+const NON_ATTACHABLE_ARTIFACT_TYPES = new Set([
+  "json", "markdown", "md", "table", "html",
+]);
+
+export function isWhatsAppAttachableMime(mime: string): boolean {
+  const base = mime.split(";")[0]!.trim().toLowerCase();
+  if (!base) return false;
+  if (WHATSAPP_BLOCKED_MIME.has(base)) return false;
+  // Allow pdf/images/office/csv/plain/octet-stream (PDF sniff upgrades octet-stream).
+  return true;
+}
+
+export function isAttachableArtifactType(type: string | null | undefined): boolean {
+  if (!type) return true; // unknown — decide by MIME after download
+  const t = type.toLowerCase();
+  if (NON_ATTACHABLE_ARTIFACT_TYPES.has(t)) return false;
+  return true;
+}
+
+/** True when identifier/title suggest a commercial invoice artifact. */
+export function isInvoiceArtifactRef(identifier: string, title?: string | null): boolean {
+  const hay = `${identifier} ${title ?? ""}`.toLowerCase();
+  return /invoice|sept[_-]?inv\b|sept_invoice|_invoice_/.test(hay);
+}
+
+function looksLikePdf(bytes: Buffer): boolean {
+  // %PDF-
+  return bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 &&
+    bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+}
+
+/**
+ * Select response artifacts that should be considered for native WA document
+ * dispatch when PromptQL has replaced inline <artifact/> tags with permalinks.
+ * Excludes json/markdown/text/table types so invoice sidecars never attach.
+ */
+export function selectDocumentArtifactRefs(artifacts: ResponseArtifact[]): ArtifactRef[] {
+  const candidates = artifacts.filter((a) => {
+    const t = (a.artifact_type ?? "").toLowerCase();
+    if (!isAttachableArtifactType(t)) return false;
+    if (t === "file" || t === "pdf" || t === "document") return true;
+    if (t === "png" || t === "jpeg" || t === "jpg" || t === "image" || t === "visualization") return true;
+    // Identifier hint only when type is missing/unknown — never for json/md.
+    if (!t && isInvoiceArtifactRef(a.identifier, a.title)) return true;
+    return false;
+  });
+
+  // Prefer real PDFs / file artifacts over images when both look like invoices.
+  const pdfish = candidates.filter((a) => {
+    const t = (a.artifact_type ?? "").toLowerCase();
+    return t === "pdf" || t === "file" || t === "document" || isInvoiceArtifactRef(a.identifier, a.title);
+  });
+  const chosen = pdfish.length > 0 ? pdfish : candidates;
+
+  return chosen.map((a): ArtifactRef => ({
+    identifier: a.identifier,
+    type: a.artifact_type ?? "file",
+  }));
+}
+
+/** After resolution: if any PDF succeeded, drop invoice sidecar attachments. */
+export function preferPdfInvoiceArtifacts(outcomes: ArtifactOutcome[]): ArtifactOutcome[] {
+  const pdfOk = outcomes.some((o) => o.ok && o.artifact.mimeType.split(";")[0]!.trim().toLowerCase() === "application/pdf");
+  if (!pdfOk) return outcomes;
+  return outcomes.map((o) => {
+    if (!o.ok) return o;
+    const mime = o.artifact.mimeType.split(";")[0]!.trim().toLowerCase();
+    if (mime === "application/pdf" || mime.startsWith("image/")) return o;
+    if (isInvoiceArtifactRef(o.artifact.identifier, o.artifact.title)) {
+      return { ok: false, identifier: o.artifact.identifier, reason: "not_attachable" as const };
+    }
+    return o;
+  });
+}
+
 /** Build a safe WhatsApp document name from the artifact identifier + MIME.
- *  Mirrors mediaFileName: strip anything that isn't filename-safe. */
-function artifactFileName(identifier: string, type: string | null, mime: string): string {
+ *  Prefers a sanitized artifact title when it already looks like a filename
+ *  (e.g. invoice PDFs titled "SEPT-INV-2026-8841.pdf"); otherwise falls back
+ *  to identifier-derived naming. Mirrors mediaFileName safety rules. */
+function artifactFileName(
+  identifier: string,
+  type: string | null,
+  mime: string,
+  title?: string | null,
+): string {
+  const ext = MIME_EXT[mime.split(";")[0]!.trim()] ?? (type ? `.${type.toLowerCase().replace(/[^a-z0-9]/g, "")}`.slice(0, 8) : "");
+  const fromTitle = sanitizeArtifactFileName(title ?? null, ext);
+  if (fromTitle) return fromTitle;
   const safeId = identifier.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "artifact";
   const base = safeId.startsWith("artifact") ? safeId : `artifact-${safeId}`;
-  const ext = MIME_EXT[mime.split(";")[0]!.trim()] ?? (type ? `.${type.toLowerCase().replace(/[^a-z0-9]/g, "")}`.slice(0, 8) : "");
   return base.endsWith(ext) || ext === "." ? base : `${base}${ext}`;
+}
+
+/** Prefer the human title when it is a single-path-segment filename; drop path
+ *  traversal / newlines. Returns null when the title is not usable as a name. */
+function sanitizeArtifactFileName(title: string | null, preferredExt: string): string | null {
+  if (!title) return null;
+  const leaf = title.replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
+  if (!leaf || leaf === "." || leaf === "..") return null;
+  const cleaned = leaf.replace(/[\r\n\u2028\u2029]+/g, " ").replace(/[^a-zA-Z0-9._ -]/g, "_").replace(/[ ]+/g, " ").trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return null;
+  const safe = cleaned.replace(/ /g, "_").slice(0, 180);
+  if (!safe) return null;
+  const lower = safe.toLowerCase();
+  const knownExts = Object.values(MIME_EXT);
+  if (knownExts.some((e) => e && lower.endsWith(e))) return safe;
+  if (!preferredExt || preferredExt === "." || lower.endsWith(preferredExt)) return safe;
+  return `${safe}${preferredExt}`;
 }

@@ -19,8 +19,10 @@ import type { ChatBotRepo } from "../storage/chatBotRepo.ts";
 import { isGroupJid } from "../util.ts";
 import {
   parseArtifactRefs,
+  selectDocumentArtifactRefs,
+  preferPdfInvoiceArtifacts,
   type PromptQlAdapter, type ArtifactOutcome, type ArtifactFailureReason,
-  type ResponseArtifact, type ArtifactRef,
+  type ResponseArtifact,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
@@ -98,19 +100,14 @@ export class OutboundDispatcher {
       : { text: answer ?? "", refs: [] };
 
     // Fallback: When PromptQL server replaces <artifact ... /> with public permalinks
-    // (e.g. https://ql.app/l/...), parseArtifactRefs sees no XML tags. Detect any file/pdf
-    // artifacts in responseArtifacts directly so documents are sent as native WhatsApp attachments.
+    // (e.g. https://ql.app/l/...), parseArtifactRefs sees no XML tags. Detect attachable
+    // file/pdf artifacts in responseArtifacts so documents go out as native WA attachments.
+    // Never treat json/markdown/text "invoice_*" sidecars as documents (live regression
+    // 2026-09-28: artifact-invoice_*.json + *.md).
     if (completed && refs.length === 0 && Array.isArray(responseArtifacts) && responseArtifacts.length > 0) {
-      const docArtifacts = responseArtifacts.filter(
-        (a) => a.artifact_type === "file" || a.artifact_type === "pdf" ||
-          a.artifact_type === "document" || a.identifier.toLowerCase().includes("inv")
-      );
-      if (docArtifacts.length > 0) {
-        refs = docArtifacts.map((a): ArtifactRef => ({
-          identifier: a.identifier,
-          type: a.artifact_type ?? "file",
-        }));
-        // Remove bare artifact permalink lines from the text so we don't repeat links in the caption
+      const selected = selectDocumentArtifactRefs(responseArtifacts);
+      if (selected.length > 0) {
+        refs = selected;
         strippedAnswer = cleanArtifactPermalinks(strippedAnswer);
       }
     }
@@ -142,8 +139,11 @@ export class OutboundDispatcher {
         outcomes = refs.map((r) => ({ ok: false, identifier: r.identifier, reason: "unavailable" as const }));
       }
     }
+    // Prefer a native PDF when invoice sidecars also resolved.
+    outcomes = preferPdfInvoiceArtifacts(outcomes);
     const artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
-    const failures = outcomes.flatMap((o) => (o.ok ? [] : [o.reason]));
+    // not_attachable = intentional skip (json/md) — do not surface as a user failure note.
+    const failures = outcomes.flatMap((o) => (o.ok || o.reason === "not_attachable" ? [] : [o.reason]));
 
     // Prepend welcome header if requested for first inbound DM with request
     const fullAnswer = input.welcomePrefix
