@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "../src/routing/sanitizer.ts";
+import { documentCaption, isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "../src/routing/sanitizer.ts";
 import { OPERATOR_WELCOME_BASE, OPERATOR_WELCOME_PROMPT } from "../src/domain/welcomeMessage.ts";
 
 describe("gw-04-platform-sanitizer: Baileys outbound message sanitization", () => {
@@ -152,5 +152,79 @@ https://www.dhl.com/track/123`;
     expect(withContent).not.toMatch(/cancelled before it could finish/i);
     expect(isLifecycleOnlyOutbound("PromptQL run was cancelled.")).toBe(true);
     expect(isLifecycleOnlyOutbound("⚠️ SEPT's run was cancelled before it could finish.")).toBe(true);
+  });
+
+  it("strips Markdown headers, emphasis, and code spans while keeping the words", () => {
+    const raw = `### Commercial invoice
+
+**Client:** Noor Al-Sabah
+*Piece:* Chanel Mini Flap
+Total: \`$5,000\`
+~~hold~~ confirmed
+
+\`\`\`json
+{ "sku": "ABC" }
+\`\`\`
+
+_Please review the attached invoice._
+
+Track: [DHL](https://www.dhl.com/track/123)
+Order #4481 stays
+https://cdn.example.com/awb_12345_label`;
+
+    const sanitized = sanitizeOutboundText(raw);
+    expect(sanitized).not.toContain("###");
+    expect(sanitized).not.toContain("**");
+    expect(sanitized).not.toContain("`");
+    expect(sanitized).not.toContain("```");
+    expect(sanitized).not.toContain("~~");
+    expect(sanitized).not.toContain("_Please");
+    expect(sanitized).not.toContain("[DHL]");
+    expect(sanitized).toContain("Commercial invoice");
+    expect(sanitized).toContain("Client: Noor Al-Sabah");
+    expect(sanitized).toContain("Piece: Chanel Mini Flap");
+    expect(sanitized).toContain("Total: $5,000");
+    expect(sanitized).toContain("hold confirmed");
+    expect(sanitized).toContain('{ "sku": "ABC" }');
+    expect(sanitized).toContain("Please review the attached invoice.");
+    expect(sanitized).toContain("DHL (https://www.dhl.com/track/123)");
+    expect(sanitized).toContain("Order #4481 stays");
+    expect(sanitized).toContain("https://cdn.example.com/awb_12345_label");
+  });
+
+  it("keeps welcome asterisks that are bullets, not emphasis", () => {
+    expect(sanitizeOutboundText(OPERATOR_WELCOME_BASE)).toBe(OPERATOR_WELCOME_BASE.trim());
+    const bullets = OPERATOR_WELCOME_BASE.split("\n").filter((line) => line.startsWith("* ")).join("\n");
+    expect(sanitizeOutboundText(bullets)).toBe(bullets);
+  });
+
+  it("keeps a long text reply intact and shortens only a document caption", () => {
+    const lines = Array.from({ length: 10 }, (_, i) => `Spec line ${i} about the piece and its condition.`);
+    const body = lines.join("\n");
+    expect(sanitizeOutboundText(body)).toBe(body);
+
+    const caption = documentCaption(body);
+    const kept = caption.split("\n").filter((line) => line.trim().length > 0);
+    expect(kept.length).toBeLessThanOrEqual(4);
+    expect(caption.length).toBeLessThanOrEqual(320);
+    expect(caption.startsWith("Spec line 0")).toBe(true);
+    expect(caption).not.toContain("Spec line 9");
+
+    const noted = documentCaption(`${body}\n\n(Attachment too large to send)`);
+    expect(noted.endsWith("(Attachment too large to send)")).toBe(true);
+    expect(noted).not.toContain("Spec line 9");
+
+    const short = "Here is the commercial invoice for your deal.\nKindly let me know once reviewed.";
+    expect(documentCaption(short)).toBe(short);
+  });
+
+  it("keeps the operator welcome whole when it prefixes a document caption", () => {
+    const answer = Array.from({ length: 10 }, (_, i) => `Spec line ${i} about the piece.`).join("\n");
+    const full = sanitizeOutboundText(`${OPERATOR_WELCOME_BASE}\n\n${answer}`);
+    const caption = documentCaption(full, OPERATOR_WELCOME_BASE);
+    expect(caption.startsWith(OPERATOR_WELCOME_BASE.trim())).toBe(true);
+    expect(caption).toContain("* Remember pieces as they come in");
+    expect(caption).toContain("Spec line 0");
+    expect(caption).not.toContain("Spec line 9");
   });
 });
