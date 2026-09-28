@@ -154,6 +154,64 @@ test("waiting_approval auto-declines and returns a console-approval notice", asy
   expect(toolCalls[1].args).toEqual({ approval_id: "ap-1", decision: "decline" });
 });
 
+const CANCEL_BANNER = "⚠️ SEPT's run was cancelled before it could finish.\nhttps://ql.app/l/AbCdEf12";
+
+test("cancelled and interrupted_due_to_new_trigger do not return the server banner", async () => {
+  const cases = [
+    { status: "cancelled", reason: "interrupted_due_to_new_trigger", expect: "interrupted_due_to_new_trigger" },
+    { status: "interrupted_due_to_new_trigger", expect: "interrupted_due_to_new_trigger" },
+    { status: "Cancelled", expect: "promptql_run_failed" },
+    { status: "canceled", expect: "promptql_run_failed" },
+    { status: "failed", expect: "promptql_run_failed" },
+    { status: "error", expect: "promptql_run_failed" },
+  ];
+  for (const c of cases) {
+    scriptByTool({
+      toolResults: [{
+        result: {
+          structuredContent: {
+            status: c.status,
+            reason: "reason" in c ? c.reason : undefined,
+            message: CANCEL_BANNER,
+          },
+        },
+      }],
+    });
+    const a = new PromptQlAdapter(deps);
+    const res = await a.waitForResponse(
+      "shopper-1",
+      { threadId: "t1", threadEventId: "e1" },
+      Date.now() + 2_000,
+    );
+    expect(res.status).toBe("failed");
+    expect(res.message).toBe(c.expect);
+    expect(res.message).not.toContain("ql.app");
+    expect(res.message).not.toContain("cancelled before");
+  }
+});
+
+test("nested interrupt code is terminal and drops the server message", async () => {
+  const { toolCalls } = scriptByTool({
+    toolResults: [{
+      result: {
+        structuredContent: {
+          status: "error",
+          error: { code: "interrupted_due_to_new_trigger", message: CANCEL_BANNER },
+          message: CANCEL_BANNER,
+        },
+      },
+    }],
+  });
+  const a = new PromptQlAdapter(deps);
+  const res = await a.waitForResponse(
+    "shopper-1",
+    { threadId: "t1", threadEventId: null },
+    Date.now() + 2_000,
+  );
+  expect(res).toEqual({ status: "failed", message: "interrupted_due_to_new_trigger" });
+  expect(toolCalls).toHaveLength(1);
+});
+
 test("ask shapes group response control, instruction and configured project name", async () => {
   const { toolCalls } = scriptByTool({
     toolResults: [{ result: { structuredContent: { thread_id: "bot" } } }],
