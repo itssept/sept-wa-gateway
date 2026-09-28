@@ -40,7 +40,10 @@ export function setup(
   } };
   const router = new InboundRouter(
     ctx.resolver, adapter as never, ctx.workflows, ctx.chatBots, ctx.outboundLog,
-    { dispatch: async (input: unknown) => { dispatches.push(input); } } as never,
+    {
+      dispatch: async (input: unknown) => { dispatches.push(input); },
+      notifyChat: async () => undefined,
+    } as never,
     ctx.audit, ctx.log,
     { settings: ctx.gatewaySettings, messages: ctx.messages, getGroup: async () => group, prepareHistory: async () => null,
       reactToMessage: async (m, emoji) => { reactions.push({ messageId: m.messageId, chatJid: m.chatJid, emoji }); },

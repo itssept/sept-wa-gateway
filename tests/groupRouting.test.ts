@@ -198,11 +198,13 @@ test("AskSubmissionError preserves handle, retries encrypted text only once on n
   expect(ctx.chatBots.get("test-conn", GROUP)?.threadId).toBe("partial-bot");
   expect(first.media).toBeNull();
   expect(String((db.query("SELECT pending_post_encrypted AS p FROM chat_bot").get() as any).p)).not.toContain("private original");
+  // upload_failed with media is retried once immediately; bytes are not kept.
+  expect(calls.slice(0, 2).every((c) => c.input.files.length === 1)).toBe(true);
   setAskHook();
   await router.handle(msg({ text: "next" }));
-  expect(calls[1]!.input).toMatchObject({ threadId: "partial-bot", query: "private original", files: [], agentResponse: "force_skip" });
-  expect(calls[2]!.input.query).toBe("next");
+  expect(calls[2]!.input).toMatchObject({ threadId: "partial-bot", query: "private original", files: [], agentResponse: "force_skip" });
+  expect(calls[3]!.input.query).toBe("next");
   expect(ctx.chatBots.pendingPost("test-conn", GROUP)).toBeNull();
   await router.handle(first);
-  expect(calls).toHaveLength(3);
+  expect(calls).toHaveLength(4);
 });

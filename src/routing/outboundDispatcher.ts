@@ -267,6 +267,32 @@ export class OutboundDispatcher {
     }
   }
 
+  /** Best-effort operator/client notice that does not consume an inbound claim.
+   *  Used when PromptQL ask fails (e.g. upload_failed) so WhatsApp is not left silent. */
+  async notifyChat(input: {
+    connectionId: string;
+    chatJid: string;
+    text: string;
+    pacingProfile?: PacingProfile;
+  }): Promise<void> {
+    const sanitized = sanitizeOutboundText(input.text).trim();
+    if (!sanitized) return;
+    const canSend = () => !isGroupJid(input.chatJid) ||
+      this.chatBots.get(input.connectionId, input.chatJid)?.relayPausedAt == null;
+    if (!canSend()) return;
+    const log = this.log.child({ chatJid: maskJid(input.chatJid) });
+    try {
+      await this.connection.sendText(input.chatJid, sanitized, {
+        pacingProfile: input.pacingProfile,
+        beforeSend: canSend,
+        onMessageId: (id) => this.outboundLog.recordGatewayMessage(input.connectionId, input.chatJid, id),
+      });
+      log.info("notify chat sent");
+    } catch (err) {
+      log.warn("notify chat failed", { err });
+    }
+  }
+
   async dispatchDirectText(input: {
     workflowId: string;
     connectionId: string;
