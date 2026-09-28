@@ -267,6 +267,63 @@ export type BotResponse =
   | { status: "declined_approval"; message: string }
   | { status: "failed"; message: string };
 
+const TERMINAL_RUN_STATUSES = new Set([
+  "failed",
+  "error",
+  "cancelled",
+  "canceled",
+  "interrupted",
+  "interrupted_due_to_new_trigger",
+]);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/** Short status tokens only. Prose (the cancel banner) is not a code. */
+function statusToken(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  // The banner is a sentence; codes are a single token, possibly spaced.
+  if (!raw || raw.length > 64 || (/\s/.test(raw) && raw.length > 40)) return null;
+  return raw.toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function looksLikeCancelBanner(value: string): boolean {
+  return /interrupted_due_to_new_trigger|\brun (?:was |has been )?cancell?ed before it could finish\b|\brun was cancell?ed\b/i.test(value);
+}
+
+/**
+ * Map a wait-tool payload to a stable failure code. The server `message` is
+ * intentionally ignored: it is the operator-facing cancel banner plus ql.app
+ * permalinks, and must not leave this adapter.
+ */
+function terminalFailureCode(sc: Record<string, unknown>): "interrupted_due_to_new_trigger" | "promptql_run_failed" | "lifecycle_notice" | null {
+  const error = asRecord(sc.error);
+  const tokens = [
+    sc.status, sc.reason, sc.error_code, sc.code,
+    sc.cancellation_reason, sc.interrupt_reason,
+    error?.code, error?.reason, error?.status, error?.type,
+    typeof sc.error === "string" ? sc.error : null,
+  ].map(statusToken).filter((t): t is string => t != null);
+
+  if (tokens.some((t) => t.includes("interrupted_due_to_new_trigger"))) {
+    return "interrupted_due_to_new_trigger";
+  }
+  if (tokens.some((t) => TERMINAL_RUN_STATUSES.has(t))) return "promptql_run_failed";
+
+  const statusBlob = [sc.status, sc.reason, sc.cancellation_reason, sc.interrupt_reason]
+    .filter((v): v is string => typeof v === "string")
+    .join("\n");
+  if (looksLikeCancelBanner(statusBlob)) {
+    return /interrupted_due_to_new_trigger/i.test(statusBlob)
+      ? "interrupted_due_to_new_trigger"
+      : "lifecycle_notice";
+  }
+  return null;
+}
+
 export const PostingIdentitySchema = z.union([
   z.object({ role: z.literal("client") }).strict(),
   z.object({ role: z.enum(["shopper", "pa"]), shopperId: z.string().min(1) }).strict(),
@@ -399,18 +456,15 @@ export class PromptQlAdapter {
     while (Date.now() < deadlineMs) {
       const session = this.session(shopperId);
       const result = await session.callTool(TOOL_WAIT, waitArgs);
-      const sc = (result.structured ?? {}) as {
+      const sc = (result.structured ?? {}) as Record<string, unknown> & {
         status?: string;
         message?: string;
         approvals?: Array<{ approval_id?: string; message?: string; description?: string }>;
         artifacts?: unknown;
       };
-      const status = sc.status ?? "";
-      const message = sc.message ?? result.text ?? "";
+      const status = (typeof sc.status === "string" ? sc.status : "").trim().toLowerCase();
+      const message = (typeof sc.message === "string" ? sc.message : "") || result.text || "";
 
-      if (status === "completed" || status === "success") {
-        return { status: "completed", message, artifacts: parseResponseArtifacts(sc.artifacts) };
-      }
       if (status === "waiting_approval") {
         await this.declineAll(session, sc.approvals ?? []);
         return {
@@ -419,8 +473,12 @@ export class PromptQlAdapter {
             "This request needs approval for a sensitive action. It was not auto-approved — please review it in the PromptQL console.",
         };
       }
-      if (status === "failed" || status === "error" || status === "cancelled") {
-        return { status: "failed", message: message || `PromptQL run ${status}` };
+      // cancelled / interrupted_due_to_new_trigger / failed. Do not return the
+      // server message — it is a system banner with internal permalinks.
+      const failure = terminalFailureCode(sc);
+      if (failure) return { status: "failed", message: failure };
+      if (status === "completed" || status === "success") {
+        return { status: "completed", message, artifacts: parseResponseArtifacts(sc.artifacts) };
       }
       // analyzing / running / anything else → keep waiting; the tool itself
       // long-polls, so we loop immediately (no extra sleep needed).

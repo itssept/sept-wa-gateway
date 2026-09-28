@@ -142,7 +142,10 @@ export class McpSession {
     const result = await this.request("tools/call", { name, arguments: args });
     const parsed = parseToolResult(result);
     if (parsed.isError) {
-      throw new McpError(`tool ${name} returned isError: ${parsed.text}`, "tool");
+      // Tool text can be a cancel banner plus ql.app permalinks. Do not put it
+      // on the Error — callers log Error.message, and that path never hits the
+      // WhatsApp sanitizer.
+      throw new McpError(`tool ${name} returned isError`, "tool");
     }
     return parsed;
   }

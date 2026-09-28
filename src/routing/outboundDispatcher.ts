@@ -33,7 +33,7 @@ import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
-import { sanitizeOutboundText } from "./sanitizer.ts";
+import { isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
 import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
 
 export interface DispatchInput {
@@ -81,6 +81,8 @@ export class OutboundDispatcher {
         deadline,
       );
       if (res.status === "failed") {
+        // Failure text is a status code, never the server banner. fail() also
+        // scrubs anything that still looks like cancel copy or a ql.app URL.
         this.fail(input, res.message);
         return;
       }
@@ -89,7 +91,8 @@ export class OutboundDispatcher {
       completed = res.status === "completed";
       if (res.status === "completed") responseArtifacts = res.artifacts ?? [];
     } catch (err) {
-      this.fail(input, `PromptQL error: ${String(err)}`);
+      this.log.warn("outbound wait failed", { err });
+      this.fail(input, "promptql_error");
       return;
     }
 
@@ -116,6 +119,16 @@ export class OutboundDispatcher {
       this.chatBots.get(input.connectionId, input.chatJid)?.relayPausedAt == null;
     if (!canSend()) {
       this.fail(input, "chat_left");
+      return;
+    }
+
+    // A new trigger cancels the in-flight turn. PromptQL then returns the
+    // system banner ("run was cancelled before it could finish" plus a
+    // ql.app permalink) as the completed message. Drop it — do not send the
+    // banner, its links, or any artifacts attached to that notice. The newer
+    // turn replies on its own.
+    if (isLifecycleOnlyOutbound(strippedAnswer)) {
+      this.fail(input, "lifecycle_notice");
       return;
     }
 
@@ -268,6 +281,13 @@ export class OutboundDispatcher {
 
     const log = this.log.child({ corrId: input.idempotencyKey, chatJid: maskJid(input.chatJid) });
     const sanitized = sanitizeOutboundText(input.text).trim();
+    if (!sanitized) {
+      this.fail(
+        { ...input, threadId: "", threadEventId: null },
+        isLifecycleOnlyOutbound(input.text) ? "lifecycle_notice" : "empty response",
+      );
+      return;
+    }
     this.workflows.markDone(input.workflowId, sanitized);
 
     try {
@@ -296,13 +316,14 @@ export class OutboundDispatcher {
   }
 
   private fail(input: DispatchInput, reason: string): void {
+    const safeReason = outboundFailureReason(reason);
     this.workflows.markFailed(input.workflowId);
     this.outboundLog.markFailed(input.connectionId, input.idempotencyKey, input.claimToken);
     this.log.warn("outbound no result", {
       corrId: input.idempotencyKey,
       chatJid: maskJid(input.chatJid),
       workflowId: input.workflowId,
-      reason,
+      reason: safeReason,
     });
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { sanitizeOutboundText } from "../src/routing/sanitizer.ts";
+import { isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "../src/routing/sanitizer.ts";
 import { OPERATOR_WELCOME_BASE, OPERATOR_WELCOME_PROMPT } from "../src/domain/welcomeMessage.ts";
 
 describe("gw-04-platform-sanitizer: Baileys outbound message sanitization", () => {
@@ -66,6 +66,60 @@ Let me know if you would like me to reserve it!`;
     expect(sanitized).toContain("https://buy.stripe.com/test_123456");
     expect(sanitized).toContain("https://www.chanel.com/us/fashion/p/A69900Y0407494305/mini-classic-handbag/");
     expect(sanitized).toBe(legitimate.trim());
+  });
+
+  it("drops a PromptQL cancel banner, internal URLs, and run ids", () => {
+    const live = `⚠️ SEPT's run was cancelled before it could finish.
+
+https://ql.app/l/AbCdEf12
+https://prompt.ql.app/project/p-217696ea-9cb2/thread/b44a88d0-ab94-47b2-ae19-d9eceab9e7c6
+https://data.prompt.ql.app/promptql/mcp-server/mcp
+ql.app/l/BareLink99
+[View run](https://ql.app/l/Markdown1)
+run id: 3f2a1111-2222-4333-8444-555566667777
+run_01HZZZZZZZZ
+Status: interrupted_due_to_new_trigger`;
+
+    const sanitized = sanitizeOutboundText(live);
+    expect(sanitized).toBe("");
+    expect(sanitized).not.toContain("ql.app");
+    expect(sanitized).not.toContain("cancelled");
+    expect(sanitized).not.toContain("3f2a1111");
+    expect(sanitized).not.toContain("interrupted_due_to_new_trigger");
+    expect(sanitized).not.toContain("run_01HZ");
+    expect(isLifecycleOnlyOutbound(live)).toBe(true);
+    expect(outboundFailureReason(live)).toBe("interrupted_due_to_new_trigger");
+  });
+
+  it("keeps concierge copy when a cancel banner is appended", () => {
+    const raw = `Invoice is ready for Noor.
+
+⚠️ SEPT's run was cancelled before it could finish.
+https://ql.app/l/ZzTop99
+
+Total $5,000.
+The shipment was cancelled before it could finish customs.
+https://www.dhl.com/track/123`;
+
+    const sanitized = sanitizeOutboundText(raw);
+    expect(sanitized).toContain("Invoice is ready for Noor.");
+    expect(sanitized).toContain("Total $5,000.");
+    expect(sanitized).toContain("The shipment was cancelled before it could finish customs.");
+    expect(sanitized).toContain("https://www.dhl.com/track/123");
+    expect(sanitized).not.toContain("ql.app");
+    expect(sanitized).not.toContain("run was cancelled");
+    expect(isLifecycleOnlyOutbound(raw)).toBe(false);
+  });
+
+  it("strips schemeless permalinks and markdown links to ql.app without touching other hosts", () => {
+    const raw = "Track it here: [View run](https://ql.app/l/abc) and ql.app/l/def plus https://instagram.com/p/ok and https://sql.app/docs";
+    const sanitized = sanitizeOutboundText(raw);
+    expect(sanitized).not.toContain("ql.app/l");
+    expect(sanitized).not.toContain("https://ql.app");
+    expect(sanitized).not.toContain("View run");
+    expect(sanitized).toContain("https://instagram.com/p/ok");
+    expect(sanitized).toContain("https://sql.app/docs");
+    expect(sanitized).toContain("Track it here:");
   });
 
   it("Criterion 4: The welcome template from Bot 1 passes the sanitizer unchanged", () => {
