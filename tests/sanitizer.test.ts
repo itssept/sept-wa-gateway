@@ -129,4 +129,28 @@ https://www.dhl.com/track/123`;
     const sanitizedPrompt = sanitizeOutboundText(OPERATOR_WELCOME_PROMPT);
     expect(sanitizedPrompt).toBe(OPERATOR_WELCOME_PROMPT.trim());
   });
+
+  it("Criterion 5: Strips SEPT/PromptQL cancelled-run platform notices", () => {
+    const variants = [
+      "⚠️ SEPT's run was cancelled before it could finish.",
+      "SEPT's run was cancelled before it could finish.",
+      "Confirmed size 38 with sourcer.\n\n⚠️ SEPT's run was cancelled before it could finish.",
+      "PromptQL run was cancelled.",
+      "PromptQL run cancelled before it could finish.",
+      "⚠️ SEPT’s run was cancelled before it could finish.",
+    ];
+    for (const v of variants) {
+      const sanitized = sanitizeOutboundText(v);
+      expect(sanitized).not.toMatch(/cancelled before it could finish/i);
+      expect(sanitized).not.toMatch(/SEPT'?s run was cancelled/i);
+      expect(sanitized).not.toMatch(/PromptQL run/i);
+    }
+    const withContent = sanitizeOutboundText(
+      "Re-confirm Louboutin Blue Me Dolly size 38 with sourcer before client quote.\n\n⚠️ SEPT's run was cancelled before it could finish.",
+    );
+    expect(withContent).toContain("Re-confirm Louboutin Blue Me Dolly size 38");
+    expect(withContent).not.toMatch(/cancelled before it could finish/i);
+    expect(isLifecycleOnlyOutbound("PromptQL run was cancelled.")).toBe(true);
+    expect(isLifecycleOnlyOutbound("⚠️ SEPT's run was cancelled before it could finish.")).toBe(true);
+  });
 });
