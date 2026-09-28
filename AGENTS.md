@@ -65,9 +65,12 @@ are covered by mocked boundary tests, not a live shopper-token test.
   `list_promptql_thread_artifact_metadata` then `get_promptql_artifact`, matched
   by `artifact_id`/exact identifier — **never the display title**. Strip the tags
   from the text. Resolve artifacts BEFORE sending so text + files go out
-  together: the reply text is the **caption on the first document**, extra
-  artifacts follow as their own documents through `sendDocument` (the anti-ban
-  queue). Record every document as a gateway echo. Bytes are transient (cap
+  together: the reply text is a **short plain-text caption on the first
+  document** (Markdown headers, emphasis, and fenced or inline code are
+  stripped; the file holds the detail), extra artifacts follow as their own
+  documents through `sendDocument` (the anti-ban queue). Text-only replies are
+  plain text too, and are not shortened. The operator welcome template is kept
+  whole when it is prefixed onto a caption. Record every document as a gateway echo. Bytes are transient (cap
   `PROMPTQL_MAX_ARTIFACT_BYTES`), released after each send, never persisted. Best-
   effort: a failed/oversized artifact is skipped, logged, and noted to the user
   in brackets appended to the reply (e.g. `(Attachment too large to send)`);

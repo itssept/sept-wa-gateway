@@ -8,8 +8,9 @@
  *  3. Resolve the originating chat from the durable dispatch record.
  *  4. Resolve any inline-referenced artifacts, then deliver the text and files
  *     together: the reply text (plus a short note about any artifact that could
- *     not be attached) rides the first document as its caption; extra artifacts
- *     follow as their own documents. With no artifact, the text is sent alone.
+ *     not be attached) rides the first document as a short plain-text caption;
+ *     extra artifacts follow as their own documents. With no artifact, the
+ *     text is sent alone (still plain text, not shortened).
  *  5. Send through Baileys via the anti-ban queue.
  *  6. Record delivery success/failure against the outbound idempotency log using
  *     the claim token (retry-safe, fenced against a lost claim).
@@ -33,7 +34,7 @@ import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
-import { isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
+import { documentCaption, isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
 import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
 
 export interface DispatchInput {
@@ -164,12 +165,18 @@ export class OutboundDispatcher {
       : strippedAnswer;
 
     // Sanitize the outbound text to strip internal platform links, ql.app permalinks,
-    // "Teach SEPT" footers, and internal platform terms before sending to WhatsApp.
+    // "Teach SEPT" footers, markdown syntax, and internal platform terms before
+    // sending to WhatsApp.
     const sanitizedText = sanitizeOutboundText(fullAnswer);
 
     // Caption = the sanitized reply text plus a short note about anything we couldn't
-    // attach. With no artifacts and no failures, this is just the text.
-    const caption = withFailureNote(sanitizedText.trim(), failures);
+    // attach. With no artifacts and no failures, this is just the text. When a
+    // document goes out, keep the caption short — the file holds the detail.
+    const noted = withFailureNote(sanitizedText.trim(), failures);
+    const [first, ...rest] = artifacts;
+    const caption = first
+      ? documentCaption(noted, input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined)
+      : noted;
     if (caption === "" && artifacts.length === 0) {
       // Nothing to say and nothing to attach — treat like an empty response.
       this.fail(input, "empty response");
@@ -180,7 +187,6 @@ export class OutboundDispatcher {
 
     // The first send is the reply that satisfies the inbound claim. When there
     // is an artifact, the text rides it as a caption; otherwise it goes as text.
-    const [first, ...rest] = artifacts;
     try {
       const ref = first
         ? await this.connection.sendDocument(

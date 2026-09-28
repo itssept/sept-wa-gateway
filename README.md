@@ -67,9 +67,11 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   (`<artifact identifier="..."/>`), those artifacts are fetched
   (`list_promptql_thread_artifact_metadata` → `get_promptql_artifact`, matched by
   `artifact_id`/identifier, never the display title) and delivered **together
-  with the text**: the reply text becomes the caption on the first document, and
-  any further artifacts follow as their own documents. The inline tags are
-  stripped from the text. Each artifact is capped at `PROMPTQL_MAX_ARTIFACT_BYTES`
+  with the text**: the reply text becomes a short plain-text caption on the
+  first document (Markdown headers, emphasis markers, and code spans are
+  removed; a long reply is cut to the opening lines because the file holds the
+  detail), and any further artifacts follow as their own documents. Text-only
+  replies stay full length. The inline tags are stripped from the text. Each artifact is capped at `PROMPTQL_MAX_ARTIFACT_BYTES`
   (16 MiB). An oversized or unfetchable artifact is skipped and audited, and a
   short note is appended to the reply in brackets, e.g.
   `(Attachment too large to send)` or `(Attachment couldn't be retrieved)`. The

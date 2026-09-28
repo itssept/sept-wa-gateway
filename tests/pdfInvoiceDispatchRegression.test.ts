@@ -321,3 +321,79 @@ test("regression gw-01b: json+md only invoice artifacts never become WA document
 
   db.close();
 });
+
+test("invoice document captions are plain text and short", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const chat = "operator@s.whatsapp.net";
+  ctx.chatBots.upsert({ connectionId: "test-conn", chatJid: chat, shopperId: "s", threadId: "bot" });
+
+  const spec = Array.from({ length: 8 }, (_, i) => `**Field ${i}:** \`value ${i}\``).join("\n");
+  const rawBotResponse = `### Commercial invoice\n\n**Client:** Noor\n\n${spec}\n\nPlease review the attached invoice.\n<artifact type="file" identifier="sept_invoice_caption" />`;
+
+  let sentDoc: { caption?: string; fileName?: string } | null = null;
+  const dispatcher = new OutboundDispatcher(
+    {
+      waitForResponse: async () => ({
+        status: "completed",
+        message: rawBotResponse,
+        artifacts: [
+          {
+            identifier: "sept_invoice_caption",
+            title: "SEPT-INV.pdf",
+            artifact_type: "file",
+            artifact_reference: { artifact_id: "art-caption", version: 0 },
+          },
+        ],
+      }),
+      resolveArtifacts: async () => [{
+        ok: true,
+        artifact: {
+          identifier: "sept_invoice_caption",
+          title: "SEPT-INV.pdf",
+          fileName: "SEPT-INV.pdf",
+          mimeType: "application/pdf",
+          bytes: Buffer.from("%PDF-1.4"),
+        },
+      }],
+    } as never,
+    ctx.workflows,
+    ctx.outboundLog,
+    {
+      sendText: async () => { throw new Error("Should not send plain text when artifact present"); },
+      sendDocument: async (_jid: string, doc: { caption?: string; fileName?: string }, opts: { onMessageId: (id: string) => void }) => {
+        opts.onMessageId("doc-caption");
+        sentDoc = doc;
+        return "doc-caption";
+      },
+    } as never,
+    ctx.config,
+    ctx.log,
+    ctx.chatBots,
+  );
+
+  const workflow = ctx.workflows.create({
+    connectionId: "test-conn", chatJid: chat, shopperId: "s", inboundMessageId: "inbound-caption", remoteRef: "bot",
+  });
+  const claim = ctx.outboundLog.claim("test-conn", "inbound-caption");
+  if (claim.status !== "claimed") throw new Error("expected claim");
+
+  await dispatcher.dispatch({
+    workflowId: workflow.id, connectionId: "test-conn", chatJid: chat,
+    shopperId: "s", idempotencyKey: "inbound-caption", claimToken: claim.token,
+    threadId: "bot", threadEventId: null,
+  });
+
+  expect(sentDoc).not.toBeNull();
+  expect(sentDoc!.fileName).toBe("SEPT-INV.pdf");
+  expect(sentDoc!.caption).toBeDefined();
+  expect(sentDoc!.caption).not.toContain("###");
+  expect(sentDoc!.caption).not.toContain("**");
+  expect(sentDoc!.caption).not.toContain("`");
+  expect(sentDoc!.caption).toContain("Commercial invoice");
+  expect(sentDoc!.caption).toContain("Client: Noor");
+  expect(sentDoc!.caption).not.toContain("Field 7");
+  const lines = sentDoc!.caption!.split("\n").filter((line) => line.trim().length > 0);
+  expect(lines.length).toBeLessThanOrEqual(4);
+
+  db.close();
+});

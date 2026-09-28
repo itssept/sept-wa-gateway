@@ -20,9 +20,23 @@
  *    - XML/platform tags (e.g. `<artifact .../>`, `<file_reference .../>`, `<user_mention .../>`, `<agent_mention/>`, `<cite>...</cite>`)
  *    - Markdown wiki links like `[Title](<wiki://...>)` -> cleaned to plain text `Title` or stripped
  *    - Platform/developer meta-language / footers
+ *    - WhatsApp does not render Markdown. Headers, emphasis markers, fenced
+ *      blocks, and inline code spans are removed; the words stay.
  * 3. Legitimate client-facing URLs (e.g. `https://instagram.com/...`, `https://dhl.com/track/...`, `https://stripe.com/...`, `https://chanel.com/...`) MUST NOT be stripped.
- * 4. The welcome template from Bot 1 passes unchanged.
+ * 4. The welcome template from Bot 1 passes unchanged (its `*` bullets are list
+ *    markers, not emphasis).
+ *
+ * Document captions are a separate, shorter cut of that plain text. The file
+ * holds the invoice detail; the caption is the lead-in.
  */
+
+/** Preferred length for a document caption. WhatsApp shows only a few lines under a file. */
+const DOCUMENT_CAPTION_MAX_CHARS = 320;
+const DOCUMENT_CAPTION_MAX_LINES = 4;
+/** WhatsApp drops or rejects a caption longer than this. */
+const WHATSAPP_CAPTION_HARD_MAX = 1024;
+
+const FAILURE_NOTE_RE = /\n\n(\((?:Attachment|\d+ attachments)[^)\n]*\))$/;
 
 /** PromptQL system-banner phrasing. Not client copy about a cancelled order. */
 const LIFECYCLE_SIGNAL =
@@ -86,7 +100,10 @@ export function sanitizeOutboundText(text: string): string {
   // A label whose internal URL was already removed, e.g. "[View run]()".
   cleaned = cleaned.replace(/\[[^\]\n]*\]\(\s*\)/g, "");
 
-  // 7. Clean up empty/dangling lines and normalize whitespace
+  // 7. WhatsApp renders none of this. Keep the words; drop the syntax.
+  cleaned = stripWhatsAppMarkdown(cleaned);
+
+  // 8. Clean up empty/dangling lines and normalize whitespace
   const lines = cleaned.split("\n");
   const filteredLines: string[] = [];
   for (const line of lines) {
@@ -94,7 +111,7 @@ export function sanitizeOutboundText(text: string): string {
     const bare = trimmed.replace(/\uFE0F/g, "");
     // Drop lines that are purely punctuation, a leftover warning mark, or empty brackets.
     // Empty lines stay — they separate paragraphs in the welcome template.
-    if (bare.length > 0 && /^[-–—→>:.\s⚠❗()[\]<>]+$/.test(bare)) {
+    if (bare.length > 0 && /^[-–—→>:.\s⚠❗()[\]<>*#|~_]+$/.test(bare)) {
       continue;
     }
     // Drop lines that end up with only a dangling colon/header after URL removal if it was an internal marker
@@ -109,6 +126,32 @@ export function sanitizeOutboundText(text: string): string {
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
 
   return cleaned;
+}
+
+/**
+ * Plain-text caption for a document send. Long replies (invoice field dumps)
+ * are cut to the opening lines — the PDF already carries the detail. A
+ * preserved prefix (the operator welcome) is kept whole. A failure note in
+ * brackets stays on the end.
+ */
+export function documentCaption(text: string, preservedPrefix?: string): string {
+  const { body, note } = splitFailureNote(text.trim());
+  const prefix = preservedPrefix?.trim() ?? "";
+  let shortBody: string;
+  if (prefix && (body === prefix || body.startsWith(`${prefix}\n`))) {
+    const rest = body.slice(prefix.length).trim();
+    const shortRest = shortenCaptionBody(rest);
+    shortBody = shortRest ? `${prefix}\n\n${shortRest}` : prefix;
+  } else {
+    shortBody = shortenCaptionBody(body);
+  }
+  const withNote = note ? (shortBody ? `${shortBody}\n\n${note}` : note) : shortBody;
+  if (withNote.length <= WHATSAPP_CAPTION_HARD_MAX) return withNote;
+  if (!note) return clipAtBoundary(withNote, WHATSAPP_CAPTION_HARD_MAX);
+  const room = WHATSAPP_CAPTION_HARD_MAX - (note.length + 2);
+  if (room < 1) return note.slice(0, WHATSAPP_CAPTION_HARD_MAX);
+  const clipped = clipAtBoundary(shortBody, room);
+  return clipped ? `${clipped}\n\n${note}` : note;
 }
 
 /**
@@ -167,4 +210,90 @@ function stripLifecycleCopy(text: string): string {
       /^(?:[ \t]*\u26A0\uFE0F?\s*)?(?:status|run status|error|reason)\s*:\s*(?:failed|error|cancell?ed|canceled|interrupted|interrupted_due_to_new_trigger)\b[^\n]*$/gim,
       "",
     );
+}
+
+/**
+ * Remove Markdown syntax WhatsApp would show literally. List markers (`* item`)
+ * stay — the welcome template uses them as bullets. Paired emphasis
+ * (`*bold*`, `**bold**`, `_italic_`) does not.
+ */
+function stripWhatsAppMarkdown(text: string): string {
+  let cleaned = text;
+  // Closed fences first, then a leftover opener/closer line. Body text stays.
+  cleaned = cleaned.replace(
+    /(^|\n)[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n[ \t]{0,3}\2[ \t]*(?=\n|$)/g,
+    (_match, lead: string, _fence: string, body: string) => `${lead}${body.replace(/\n$/, "")}`,
+  );
+  cleaned = cleaned.replace(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*$/gm, "");
+  // Longer backtick spans before single ones, so ``code`` is not eaten as `code`.
+  cleaned = cleaned.replace(/(?<!`)``([^`\n]+)``(?!`)/g, "$1");
+  cleaned = cleaned.replace(/(?<!`)`([^`\n]+)`(?!`)/g, "$1");
+  // ATX headers. A bare "Order #123" is not a header (no space-separated marker at column 0).
+  cleaned = cleaned.replace(/^[ \t]{0,3}#{1,6}[ \t]*$/gm, "");
+  cleaned = cleaned.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, "$1");
+  // Horizontal rules.
+  cleaned = cleaned.replace(/^[ \t]{0,3}(?:[-*_]){3,}[ \t]*$/gm, "");
+  cleaned = stripEmphasis(cleaned);
+  // Remaining markdown links read as the label plus the URL.
+  cleaned = cleaned.replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1");
+  cleaned = cleaned.replace(/\[([^\]\n]+)\]\(\s*(https?:\/\/[^)\s]+)\s*\)/g, "$1 ($2)");
+  return cleaned;
+}
+
+function stripEmphasis(text: string): string {
+  let current = text;
+  for (let pass = 0; pass < 3; pass++) {
+    const next = current
+      .replace(/(?<![\w*])\*\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*\*(?![\w*])/g, "$1")
+      .replace(/(?<![\w*])\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*(?![\w*])/g, "$1")
+      .replace(/(?<![\w*])\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?![\w*])/g, "$1")
+      .replace(/(?<![\w_])___([^\s_](?:[^_\n]*?[^\s_])?)___(?![\w_])/g, "$1")
+      .replace(/(?<![\w_])__([^\s_](?:[^_\n]*?[^\s_])?)__(?![\w_])/g, "$1")
+      .replace(/(?<![\w_])_([^\s_](?:[^_\n]*?[^\s_])?)_(?![\w_])/g, "$1")
+      .replace(/(?<!~)~~([^\s~](?:[^~\n]*?[^\s~])?)~~(?!~)/g, "$1");
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+function splitFailureNote(text: string): { body: string; note: string | null } {
+  const match = text.match(FAILURE_NOTE_RE);
+  if (!match || match.index == null) return { body: text, note: null };
+  return { body: text.slice(0, match.index).trim(), note: match[1] ?? null };
+}
+
+function shortenCaptionBody(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  const nonEmpty = trimmed.split("\n").filter((line) => line.trim().length > 0);
+  if (trimmed.length <= DOCUMENT_CAPTION_MAX_CHARS && nonEmpty.length <= DOCUMENT_CAPTION_MAX_LINES) {
+    return trimmed;
+  }
+  const kept: string[] = [];
+  let count = 0;
+  for (const line of trimmed.split("\n")) {
+    if (line.trim().length === 0) {
+      if (count > 0 && count < DOCUMENT_CAPTION_MAX_LINES) kept.push("");
+      continue;
+    }
+    if (count >= DOCUMENT_CAPTION_MAX_LINES) break;
+    kept.push(line.trimEnd());
+    count++;
+  }
+  let result = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (result.length > DOCUMENT_CAPTION_MAX_CHARS) result = clipAtBoundary(result, DOCUMENT_CAPTION_MAX_CHARS);
+  return result;
+}
+
+function clipAtBoundary(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  let lastSentenceEnd = -1;
+  const sentenceEnd = /[.!?](?=\s|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = sentenceEnd.exec(slice))) lastSentenceEnd = match.index + 1;
+  if (lastSentenceEnd >= 40) return slice.slice(0, lastSentenceEnd).trim();
+  const word = slice.replace(/\s+\S*$/, "").trim();
+  return word.length >= 40 ? word : slice.trim();
 }
