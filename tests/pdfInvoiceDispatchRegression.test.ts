@@ -154,3 +154,170 @@ test("regression gw-01: download failure produces 'failed to send' notice and ne
 
   db.close();
 });
+
+test("regression gw-01b: invoice json+markdown sidecars are NOT attached; PDF is preferred", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const chat = "operator@s.whatsapp.net";
+  ctx.chatBots.upsert({ connectionId: "test-conn", chatJid: chat, shopperId: "s", threadId: "bot" });
+
+  // Live failure mode (2026-09-28 ~07:02 Rome): PromptQL replaced tags with permalinks
+  // and listed invoice_* json + md artifacts. Gateway must not sendDocument those.
+  const rawBotResponse = `Invoice ready for Dina.\nhttps://ql.app/l/abc123\n\nPlease confirm once paid.`;
+
+  const sentDocs: any[] = [];
+  let sentText: any = null;
+  const dispatcher = new OutboundDispatcher(
+    {
+      waitForResponse: async () => ({
+        status: "completed",
+        message: rawBotResponse,
+        artifacts: [
+          {
+            identifier: "invoice_dina_me_dolly",
+            title: "invoice_dina_me_dolly",
+            artifact_type: "json",
+            artifact_reference: { artifact_id: "art-json", version: 0 },
+          },
+          {
+            identifier: "invoice_dina_me_dolly_md",
+            title: "invoice_dina_me_dolly.md",
+            artifact_type: "markdown",
+            artifact_reference: { artifact_id: "art-md", version: 0 },
+          },
+          {
+            identifier: "sept_invoice_dina_me_dolly",
+            title: "SEPT-INV-2026-DINA.pdf",
+            artifact_type: "file",
+            artifact_reference: { artifact_id: "art-pdf", version: 0 },
+          },
+        ],
+      }),
+      resolveArtifacts: async (_identity: any, _respArts: any[], resolvedRefs: any[]) => {
+        // Must not request json/md sidecars.
+        expect(resolvedRefs.every((r: any) => !/json|markdown|md/i.test(r.type ?? ""))).toBe(true);
+        expect(resolvedRefs.some((r: any) => r.identifier === "sept_invoice_dina_me_dolly")).toBe(true);
+        return resolvedRefs.map((r: any) => ({
+          ok: true as const,
+          artifact: {
+            identifier: r.identifier,
+            title: "SEPT-INV-2026-DINA.pdf",
+            fileName: "SEPT-INV-2026-DINA.pdf",
+            mimeType: "application/pdf",
+            bytes: Buffer.from("%PDF-1.4 dina invoice"),
+          },
+        }));
+      },
+    } as never,
+    ctx.workflows,
+    ctx.outboundLog,
+    {
+      sendText: async (_jid: string, text: string, opts: any) => {
+        opts.onMessageId("text-1");
+        sentText = text;
+        return "text-1";
+      },
+      sendDocument: async (_jid: string, doc: any, opts: any) => {
+        opts.onMessageId(`doc-${sentDocs.length}`);
+        sentDocs.push(doc);
+        return `doc-${sentDocs.length}`;
+      },
+    } as never,
+    ctx.config,
+    ctx.log,
+    ctx.chatBots,
+  );
+
+  const workflow = ctx.workflows.create({
+    connectionId: "test-conn", chatJid: chat, shopperId: "s", inboundMessageId: "inbound-inv-3", remoteRef: "bot",
+  });
+  const claim = ctx.outboundLog.claim("test-conn", "inbound-inv-3");
+  if (claim.status !== "claimed") throw new Error("expected claim");
+
+  await dispatcher.dispatch({
+    workflowId: workflow.id, connectionId: "test-conn", chatJid: chat,
+    shopperId: "s", idempotencyKey: "inbound-inv-3", claimToken: claim.token,
+    threadId: "bot", threadEventId: null,
+  });
+
+  expect(sentDocs.length).toBe(1);
+  expect(sentDocs[0].mimeType).toBe("application/pdf");
+  expect(sentDocs[0].fileName).toBe("SEPT-INV-2026-DINA.pdf");
+  expect(sentDocs[0].caption).toContain("Invoice ready for Dina.");
+  expect(sentDocs[0].caption).not.toContain("https://ql.app/l/");
+  expect(sentText).toBeNull();
+
+  db.close();
+});
+
+test("regression gw-01b: json+md only invoice artifacts never become WA documents", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const chat = "operator@s.whatsapp.net";
+  ctx.chatBots.upsert({ connectionId: "test-conn", chatJid: chat, shopperId: "s", threadId: "bot" });
+
+  const rawBotResponse = `Here is the invoice as markdown (bad path).\nhttps://ql.app/l/xyz`;
+
+  let sentText: any = null;
+  let sentDoc: any = null;
+  const dispatcher = new OutboundDispatcher(
+    {
+      waitForResponse: async () => ({
+        status: "completed",
+        message: rawBotResponse,
+        artifacts: [
+          {
+            identifier: "invoice_dina_me_dolly",
+            title: "invoice_dina_me_dolly",
+            artifact_type: "json",
+            artifact_reference: { artifact_id: "art-json", version: 0 },
+          },
+          {
+            identifier: "invoice_dina_me_dolly_md",
+            title: "invoice.md",
+            artifact_type: "markdown",
+            artifact_reference: { artifact_id: "art-md", version: 0 },
+          },
+        ],
+      }),
+      resolveArtifacts: async () => {
+        throw new Error("resolveArtifacts must not be called for json/md-only invoice sidecars");
+      },
+    } as never,
+    ctx.workflows,
+    ctx.outboundLog,
+    {
+      sendText: async (_jid: string, text: string, opts: any) => {
+        opts.onMessageId("text-only");
+        sentText = text;
+        return "text-only";
+      },
+      sendDocument: async (_jid: string, doc: any) => {
+        sentDoc = doc;
+        return "should-not";
+      },
+    } as never,
+    ctx.config,
+    ctx.log,
+    ctx.chatBots,
+  );
+
+  const workflow = ctx.workflows.create({
+    connectionId: "test-conn", chatJid: chat, shopperId: "s", inboundMessageId: "inbound-inv-4", remoteRef: "bot",
+  });
+  const claim = ctx.outboundLog.claim("test-conn", "inbound-inv-4");
+  if (claim.status !== "claimed") throw new Error("expected claim");
+
+  await dispatcher.dispatch({
+    workflowId: workflow.id, connectionId: "test-conn", chatJid: chat,
+    shopperId: "s", idempotencyKey: "inbound-inv-4", claimToken: claim.token,
+    threadId: "bot", threadEventId: null,
+  });
+
+  expect(sentDoc).toBeNull();
+  expect(sentText).not.toBeNull();
+  expect(sentText).toContain("Here is the invoice as markdown");
+  expect(sentText).not.toContain("https://ql.app/l/");
+  // No false "couldn't be retrieved" for intentional skips
+  expect(sentText).not.toContain("couldn't be retrieved");
+
+  db.close();
+});
