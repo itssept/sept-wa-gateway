@@ -68,6 +68,16 @@ Let me know if you would like me to reserve it!`;
     expect(sanitized).toBe(legitimate.trim());
   });
 
+  it("strips ephemeral media bridge bearer URLs and keeps other links", () => {
+    const token = "ab".repeat(24);
+    const raw = `Here is the bag.\nhttp://64.225.89.130:8790/api/v1/ephemeral-media/${token}\nhttps://www.chanel.com/us/`;
+    const sanitized = sanitizeOutboundText(raw);
+    expect(sanitized).not.toContain("ephemeral-media");
+    expect(sanitized).not.toContain(token);
+    expect(sanitized).toContain("Here is the bag.");
+    expect(sanitized).toContain("https://www.chanel.com/us/");
+  });
+
   it("drops a PromptQL cancel banner, internal URLs, and run ids", () => {
     const live = `⚠️ SEPT's run was cancelled before it could finish.
 

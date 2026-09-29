@@ -22,6 +22,7 @@ import type { Config } from "../config.ts";
 import type { DownloadedMedia } from "../whatsapp/media.ts";
 import { rootLogger, type Logger } from "../logger.ts";
 import { McpSession, McpError } from "./mcpClient.ts";
+import { normalizePromptQlFile } from "./mediaFiles.ts";
 
 const TOOL_ASK = "ask_promptql";
 const TOOL_WAIT = "get_latest_promptql_thread_response";
@@ -115,11 +116,11 @@ export function promptQlFileFromMedia(
   const mime = sniffed
     ?? (declared?.toLowerCase() === "image/jpg" ? "image/jpeg" : declared)
     ?? "application/octet-stream";
-  return PromptQlFileInputSchema.parse({
+  return normalizePromptQlFile(PromptQlFileInputSchema.parse({
     file_name: alignFileName(media.fileName ?? fallbackFileName, mime),
     mime_type: mime,
     content_base64: bytes.toString("base64"),
-  });
+  }));
 }
 
 /** Decoded size of an ask_promptql file list, for the MCP body budget. */
@@ -298,6 +299,8 @@ export class AskSubmissionError extends McpError {
   constructor(
     readonly status: Exclude<z.infer<typeof AskStatusSchema>, "success">,
     readonly ask: AskResult,
+    /** Sanitized upstream class token (error_code / error_type); never the raw error_message. */
+    readonly detailCode: string | null = null,
   ) {
     super(`${TOOL_ASK} failed: ${status}`, "tool");
     this.name = "AskSubmissionError";
@@ -322,6 +325,9 @@ const AskResponseSchema = z.object({
   status: AskStatusSchema.optional(),
   thread_id: z.string().min(1),
   thread_event_id: z.string().min(1).nullish(),
+  // Optional class tokens only — never log error_message (may contain PII/filenames).
+  error_code: z.string().min(1).max(128).optional(),
+  error_type: z.string().min(1).max(128).optional(),
 });
 
 export type BotResponse =
@@ -495,9 +501,10 @@ export class PromptQlAdapter {
     const sc = parsed.data;
     const ask = { threadId: sc.thread_id, threadEventId: sc.thread_event_id ?? null };
     if (sc.status && sc.status !== "success") {
-      // Error details may contain file content or PII. Expose only the status
-      // and handle; do not log the server's untrusted error_message.
-      throw new AskSubmissionError(sc.status, ask);
+      // Error details may contain file content or PII. Expose only the status,
+      // handle, and short class tokens — never the server's error_message.
+      const detailCode = sc.error_code ?? sc.error_type ?? null;
+      throw new AskSubmissionError(sc.status, ask, detailCode);
     }
     return ask;
   }

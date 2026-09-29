@@ -34,12 +34,19 @@ import {
 } from "./schemas.ts";
 import { sha256Hex } from "../crypto.ts";
 import { canonicalizeE164 } from "../util.ts";
+import {
+  type EphemeralMediaStore,
+  contentDispositionInline,
+  isEphemeralMediaPath,
+  safeContentType,
+} from "./ephemeralMedia.ts";
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024;
 
 interface ApiDeps {
   ctx: AppContext;
   connection?: WhatsAppConnection;
+  ephemeralMedia?: EphemeralMediaStore;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -83,7 +90,7 @@ async function readJson<T>(
 }
 
 export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> {
-  const { ctx, connection } = deps;
+  const { ctx, connection, ephemeralMedia } = deps;
   const log = ctx.log.child({ component: "api" });
 
   return async function handle(req: Request): Promise<Response> {
@@ -114,6 +121,23 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
     // Unauthenticated health check.
     if (req.method === "GET" && url.pathname === "/health") {
       return json({ status: "ok" });
+    }
+
+    // Token-gated ephemeral media bridge (no admin auth — token is the secret).
+    const ephemeralToken = isEphemeralMediaPath(url.pathname);
+    if (ephemeralToken && req.method === "GET") {
+      if (!ephemeralMedia) return err(404, "not found");
+      const entry = ephemeralMedia.take(ephemeralToken);
+      if (!entry) return err(404, "not found");
+      return new Response(entry.bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": safeContentType(entry.mimeType),
+          "Content-Length": String(entry.bytes.length),
+          "Cache-Control": "no-store",
+          "Content-Disposition": contentDispositionInline(entry.fileName),
+        },
+      });
     }
 
     // Everything under /api/v1 requires admin auth.

@@ -76,7 +76,11 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   short note is appended to the reply in brackets, e.g.
   `(Attachment too large to send)` or `(Attachment couldn't be retrieved)`. The
   text reply is always delivered regardless.
-- Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`. Missing Client
+- Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`, except
+  `GET /api/v1/ephemeral-media/:token` (single-use fetch bridge when PromptQL
+  `files[]` staging returns `upload_failed`). Set `GATEWAY_PUBLIC_BASE_URL` to
+  an origin PromptQL Cloud can reach (SFO3: `http://64.225.89.130:8790`) or
+  the bridge stays off and the operator gets the resend notice. Missing Client
   setup drops Client traffic with an audit/log, without a WhatsApp reply.
 
 ### Routing

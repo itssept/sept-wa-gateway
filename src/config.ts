@@ -136,6 +136,11 @@ const EnvSchema = z.object({
     .transform((value) => value === "true"),
   ORG_CRAFT_FILE: z.string().optional(),
   ORG_CRAFT_SYSTEM_INSTRUCTION: z.string().optional(),
+
+  // Public base URL of THIS gateway (scheme+host[:port], no trailing slash), used
+  // to build ephemeral media bridge URLs when ask_promptql.files staging fails.
+  // Example: http://64.225.89.130:8790 — must be reachable from PromptQL Cloud.
+  GATEWAY_PUBLIC_BASE_URL: z.string().url().or(z.literal("")).default(""),
 }).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
   path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
   message: "must be greater than or equal to WHATSAPP_PA_REPLY_DELAY_MIN_MS",
@@ -165,6 +170,8 @@ export interface Config {
   inboundDebounceMs: number;
   /** Relay ownerless (unregistered/unqualified) chats to the common room. */
   relayUnregisteredChats: boolean;
+  /** Public origin for ephemeral media bridge URLs; empty disables bridge. */
+  publicBaseUrl: string;
 
   /** Issue #25: inject shared craft into ask_promptql system_instruction. */
   orgCraftInject: boolean;
@@ -221,6 +228,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
     inboundDebounceMs: e.WHATSAPP_INBOUND_DEBOUNCE_MS,
     relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
+    publicBaseUrl: e.GATEWAY_PUBLIC_BASE_URL.replace(/\/+$/, ""),
 
     orgCraftInject: e.ORG_CRAFT_INJECT,
     orgCraftFile: e.ORG_CRAFT_FILE || undefined,

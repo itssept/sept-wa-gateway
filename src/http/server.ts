@@ -14,6 +14,7 @@ import { InboundRouter } from "../routing/inboundRouter.ts";
 import { loadOrgCraftSystemInstruction } from "../craft/orgCraft.ts";
 import { OutboundDispatcher } from "../routing/outboundDispatcher.ts";
 import { makeHandler } from "./adminApi.ts";
+import { EphemeralMediaStore } from "./ephemeralMedia.ts";
 import { rootLogger } from "../logger.ts";
 import { maskNumber } from "../util.ts";
 
@@ -21,6 +22,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const ctx = createContext(config);
   const log = ctx.log.child({ component: "server" });
+
+  const ephemeralMedia = new EphemeralMediaStore();
 
   const antiBan = new AntiBanQueue({
     sendRatePerSec: config.sendRatePerSec,
@@ -109,10 +112,12 @@ async function main(): Promise<void> {
       relayUnregisteredChats: config.relayUnregisteredChats,
       inboundDebounceMs: config.inboundDebounceMs,
       orgCraftSystemInstruction,
+      ephemeralMedia,
+      publicBaseUrl: config.publicBaseUrl,
     },
   );
 
-  const handle = makeHandler({ ctx, connection });
+  const handle = makeHandler({ ctx, connection, ephemeralMedia });
 
   const server = Bun.serve({
     port: config.apiPort,

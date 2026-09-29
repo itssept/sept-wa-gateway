@@ -37,6 +37,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     orgCraftInject: false,
     orgCraftFile: undefined,
     orgCraftSystemInstruction: undefined,
+    publicBaseUrl: "",
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

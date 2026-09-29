@@ -383,7 +383,8 @@ test.each([
   expect(toolCalls).toHaveLength(1);
   const file = toolCalls[0]!.args.files[0];
   expect(file.file_name).toBe(fallbackName);
-  expect(file.mime_type).toBe(mime);
+  // Mime parameters are stripped before ask_promptql.files (staging rejects ;params).
+  expect(file.mime_type).toBe(mime.split(";")[0]!.trim());
   expect(Buffer.from(file.content_base64, "base64")).toEqual(Buffer.from([0, 255, 10]));
 });
 
