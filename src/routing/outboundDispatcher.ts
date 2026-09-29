@@ -34,7 +34,7 @@ import type { Logger } from "../logger.ts";
 import { maskJid } from "../util.ts";
 
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
-import { documentCaption, isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
+import { documentCaption, isLifecycleOnlyOutbound, isPromptQlEnvelopeOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
 import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
 
 export interface DispatchInput {
@@ -130,6 +130,16 @@ export class OutboundDispatcher {
     // turn replies on its own.
     if (isLifecycleOnlyOutbound(strippedAnswer)) {
       this.fail(input, "lifecycle_notice");
+      return;
+    }
+
+    // Live P0 2026-09-29 ~21:59 Rome: get_latest_promptql_thread_response returned
+    // status=completed with empty artifacts and no client message; MCP text fell
+    // back to the raw structured JSON envelope and it was sent as WA chat text.
+    // Prefer silence — never dump platform JSON. Invoice path needs a PDF (or a
+    // real human message), not this blob.
+    if (isPromptQlEnvelopeOutbound(strippedAnswer)) {
+      this.fail(input, "promptql_envelope");
       return;
     }
 
@@ -314,9 +324,14 @@ export class OutboundDispatcher {
     const log = this.log.child({ corrId: input.idempotencyKey, chatJid: maskJid(input.chatJid) });
     const sanitized = sanitizeOutboundText(input.text).trim();
     if (!sanitized) {
+      const reason = isPromptQlEnvelopeOutbound(input.text)
+        ? "promptql_envelope"
+        : isLifecycleOnlyOutbound(input.text)
+          ? "lifecycle_notice"
+          : "empty response";
       this.fail(
         { ...input, threadId: "", threadEventId: null },
-        isLifecycleOnlyOutbound(input.text) ? "lifecycle_notice" : "empty response",
+        reason,
       );
       return;
     }

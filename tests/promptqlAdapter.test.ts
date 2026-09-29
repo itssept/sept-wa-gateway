@@ -5,6 +5,7 @@
 
 import { test, expect, afterEach } from "bun:test";
 import {
+  clientFacingWaitMessage,
   PromptQlAdapter, AskSubmissionError, promptQlFileFromMedia, parseArtifactRefs,
   normalizeQueryForMcp,
 } from "../src/promptql/promptqlAdapter.ts";
@@ -588,4 +589,50 @@ test("resolveArtifacts returns nothing for no references and makes no calls", as
   const a = new PromptQlAdapter(deps);
   expect(await a.resolveArtifacts("shopper-1", [], [], 1024)).toEqual([]);
   expect(toolCalls).toHaveLength(0);
+});
+
+
+test("clientFacingWaitMessage ignores PromptQL envelope JSON fallback text", () => {
+  // Exact bytes from the 2026-09-29 Yara smoke (sha-c5df721).
+  const envelope = '{"artifacts":[],"status":"completed","project_name":"p-217696ea-9cb2","warnings":[],"approvals":[]}';
+  const spaced = '{"artifacts": [],"status":"completed","project_name":"p-217696ea-9cb2","warnings":[],"approvals":[]}';
+  expect(clientFacingWaitMessage(undefined, envelope)).toBe("");
+  expect(clientFacingWaitMessage("", envelope)).toBe("");
+  expect(clientFacingWaitMessage(undefined, spaced)).toBe("");
+  expect(clientFacingWaitMessage("Invoice ready for Noor.", envelope)).toBe("Invoice ready for Noor.");
+  expect(clientFacingWaitMessage(undefined, "Hello operator")).toBe("Hello operator");
+  const nested = JSON.stringify({
+    status: "completed",
+    artifacts: [],
+    project_name: "p-217696ea-9cb2",
+    message: "Here is your invoice.",
+  });
+  expect(clientFacingWaitMessage(undefined, nested)).toBe("Here is your invoice.");
+});
+
+test("waitForResponse completed with empty message + envelope text yields empty message", async () => {
+  const envelope = '{"artifacts":[],"status":"completed","project_name":"p-217696ea-9cb2","warnings":[],"approvals":[]}';
+  scriptByTool({
+    toolResults: [
+      {
+        result: {
+          content: [{ type: "text", text: envelope }],
+          structuredContent: {
+            status: "completed",
+            artifacts: [],
+            project_name: "p-217696ea-9cb2",
+            warnings: [],
+            approvals: [],
+          },
+        },
+      },
+    ],
+  });
+  const a = new PromptQlAdapter(deps);
+  const res = await a.waitForResponse(
+    "shopper-1",
+    { threadId: "t1", threadEventId: "e1" },
+    Date.now() + 5_000,
+  );
+  expect(res).toEqual({ status: "completed", message: "", artifacts: [] });
 });
