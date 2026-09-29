@@ -18,7 +18,12 @@ afterEach(() => {
   for (const app of apps.splice(0)) app.db.close();
 });
 
-function setup(opts: { failTimes?: number; status?: "upload_failed" | "sent_message_failed" } = {}): App {
+function setup(opts: {
+  failTimes?: number;
+  status?: "upload_failed" | "sent_message_failed";
+  failWhen?: (input: { files?: unknown[] }) => boolean;
+  debounceMs?: number;
+} = {}): App {
   const app = makeTestApp();
   const { ctx } = app;
   ctx.gatewaySettings.set("client-token", "common-room");
@@ -33,7 +38,8 @@ function setup(opts: { failTimes?: number; status?: "upload_failed" | "sent_mess
   const adapter = {
     ask: async (identity: PostingIdentity, input: any) => {
       calls.push({ identity, input: structuredClone(input) });
-      if (failsLeft > 0) {
+      const shouldFail = opts.failWhen ? opts.failWhen(input) : true;
+      if (shouldFail && failsLeft > 0) {
         failsLeft -= 1;
         throw new AskSubmissionError(status, { threadId: "partial-bot", threadEventId: null });
       }
@@ -63,7 +69,7 @@ function setup(opts: { failTimes?: number; status?: "upload_failed" | "sent_mess
       prepareHistory: async () => null,
       reactToMessage: async () => undefined,
       relayUnregisteredChats: true,
-      inboundDebounceMs: 0,
+      inboundDebounceMs: opts.debounceMs ?? 0,
     },
   );
 
@@ -128,6 +134,46 @@ test("operator resend notices survive outbound sanitizer", () => {
   ]) {
     expect(sanitizeOutboundText(notice).trim()).toBe(notice);
   }
+});
+
+test("two photos that fail as one upload are each uploaded, with no resend notice", async () => {
+  const app = setup({
+    failTimes: 5,
+    debounceMs: 40,
+    failWhen: (input) => (input.files?.length ?? 0) > 1,
+  });
+  await Promise.all([
+    app.router.handle(imageMsg("img-bag")),
+    app.router.handle(imageMsg("img-invoice")),
+  ]);
+  expect(app.calls[0]!.input.files).toHaveLength(2);
+  expect(app.calls.slice(1).map((c) => c.input.files.length)).toEqual([1, 1]);
+  expect(app.calls[1]!.input.agentResponse).toBe("force_skip");
+  expect(app.calls[1]!.input.query).toBe("(image)");
+  expect(app.calls[1]!.input.threadId).toBe("partial-bot");
+  expect(app.calls[2]!.input.agentResponse).toBe("force_respond");
+  expect(app.calls[2]!.input.query).toBe("(image)\n(image)");
+  expect(app.notices).toHaveLength(0);
+  expect(app.ctx.chatBots.pendingPost("test-conn", DM)).toBeNull();
+});
+
+test("two large photos are not bundled into one ask", async () => {
+  const app = setup({ failTimes: 0, debounceMs: 40 });
+  const big = Buffer.alloc(3 * 1024 * 1024, 7);
+  big[0] = 0xff;
+  big[1] = 0xd8;
+  big[2] = 0xff;
+  const photo = (id: string): InboundMessage => ({
+    ...imageMsg(id),
+    media: { bytes: big, mime: "image/jpeg", sizeBytes: big.length },
+  });
+  await Promise.all([
+    app.router.handle(photo("big-1")),
+    app.router.handle(photo("big-2")),
+  ]);
+  expect(app.calls).toHaveLength(2);
+  expect(app.calls.every((c) => c.input.files.length === 1)).toBe(true);
+  expect(app.notices).toHaveLength(0);
 });
 
 test("text upload_failed does not retry or notify", async () => {
