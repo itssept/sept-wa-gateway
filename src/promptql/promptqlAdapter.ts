@@ -470,7 +470,7 @@ export class PromptQlAdapter {
         return {
           status: "declined_approval",
           message:
-            "This request needs approval for a sensitive action. It was not auto-approved — please review it in the PromptQL console.",
+            "This request needs approval for a sensitive action. It was not auto-approved — please review it in the workspace.",
         };
       }
       // cancelled / interrupted_due_to_new_trigger / failed. Do not return the
