@@ -3,7 +3,7 @@ import type { InboundMessage, HistoryBatchEvent, RoutingGroup } from "../whatsap
 import type { SelfMembershipEvent } from "../whatsapp/groupEvents.ts";
 import type { ShopperResolver } from "./resolver.ts";
 import {
-  AskSubmissionError, promptQlFileFromMedia,
+  AskSubmissionError, promptQlFileFromMedia, promptQlUploadRawBytes,
   type PromptQlAdapter, type PromptQlFileInput, type PostingIdentity, type AskResult,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
@@ -36,11 +36,19 @@ export interface RoutingDeps {
   relayUnregisteredChats?: boolean;
   /** Inbound debouncing window in milliseconds (0 = disabled). */
   inboundDebounceMs?: number;
+  /** Issue #25: preformatted shared-craft system_instruction (craft-only, no PII). */
+  orgCraftSystemInstruction?: string;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
  *  so users know a reply is coming. */
 const AGENT_ACK_EMOJI = "👀";
+/**
+ * Two or more photos in one ask_promptql body are what live traffic rejects
+ * with `upload_failed` (Chanel bag + invoice, 2026-09-29). Above this decoded
+ * size, send the files as separate posts instead of building that body.
+ */
+const MULTI_FILE_UPLOAD_BUDGET_BYTES = 5 * 1024 * 1024;
 interface Destination {
   owner: Shopper | null;
   ownerId: string | null;
@@ -262,6 +270,78 @@ export class InboundRouter {
     });
   }
 
+  /**
+   * One PromptQL post, or several when a multi-file upload is the thing
+   * PromptQL rejects. A same-body retry does not change `upload_failed`.
+   * Files after the first are context (`force_skip`); the last post keeps
+   * the turn's response mode so the agent still answers once.
+   */
+  private async submitTurn(
+    msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">,
+    dest: Destination, identity: PostingIdentity, query: string,
+    agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[],
+    rememberFailure: boolean, messageId: string | undefined, log: Logger,
+  ): Promise<AskResult> {
+    const oversized = files.length > 1 && promptQlUploadRawBytes(files) > MULTI_FILE_UPLOAD_BUDGET_BYTES;
+    if (oversized) {
+      log.warn("splitting media upload to stay within PromptQL request budget", {
+        fileCount: files.length, totalBytes: promptQlUploadRawBytes(files),
+      });
+      return this.submitFilesOneByOne(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
+    }
+    try {
+      return await this.submit(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
+    } catch (err) {
+      if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || files.length === 0) {
+        throw err;
+      }
+      if (files.length > 1) {
+        // Live 2026-09-29: bag + invoice photo failed twice as one files[]
+        // payload, then the operator only got a resend notice.
+        log.warn("ask upload_failed; uploading each file on its own", { fileCount: files.length });
+        const ask = await this.submitFilesOneByOne(
+          msg, dest, identity, query, agentResponse, files, rememberFailure, messageId,
+        );
+        this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
+        return ask;
+      }
+      log.warn("ask upload_failed; retrying once", { status: err.status, fileCount: files.length });
+      const ask = await this.submit(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
+      this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
+      return ask;
+    }
+  }
+
+  private async submitFilesOneByOne(
+    msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">,
+    dest: Destination, identity: PostingIdentity, query: string,
+    agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[],
+    rememberFailure: boolean, messageId: string | undefined,
+  ): Promise<AskResult> {
+    let ask!: AskResult;
+    for (let i = 0; i < files.length; i++) {
+      const last = i === files.length - 1;
+      const file = files[i]!;
+      try {
+        ask = await this.submit(
+          msg, dest, identity,
+          last ? query : uploadRelayQuery(file),
+          last ? agentResponse : "force_skip",
+          [file],
+          last && rememberFailure,
+          messageId,
+        );
+      } catch (err) {
+        if (!last && rememberFailure) {
+          this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, { identity, query, messageId });
+        }
+        throw err;
+      }
+      if (!last) this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
+    }
+    return ask;
+  }
+
   private async submit(
     msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">,
     dest: Destination, identity: PostingIdentity, query: string,
@@ -273,9 +353,11 @@ export class InboundRouter {
     // destination. Keep the old mapping until MCP returns a new handle.
     const promoting = existing?.shopperId === null && dest.ownerId !== null;
     try {
+      const systemInstruction = this.deps.orgCraftSystemInstruction || undefined;
       const ask = await this.adapter.ask(identity, {
         query, threadId: promoting ? null : existing?.threadId ?? null,
         roomName: !existing || promoting ? dest.roomName : null, agentResponse, files,
+        ...(systemInstruction ? { systemInstruction } : {}),
       });
       this.remember(msg, dest, ask);
       return ask;
@@ -420,28 +502,9 @@ export class InboundRouter {
 
       let ask: AskResult;
       try {
-        try {
-          ask = await this.submit(
-            firstMsg, dest, identity,
-            rawQuery,
-            agentResponse, files, true, firstMsg.messageId,
-          );
-        } catch (err) {
-          // Live 2026-09-28: a bare image ask failed once with upload_failed and
-          // left WhatsApp silent. Retry the same payload once before a notice.
-          if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || !hadReadyMedia) {
-            throw err;
-          }
-          log.warn("ask upload_failed; retrying once", { status: err.status, fileCount: files.length });
-          ask = await this.submit(
-            firstMsg, dest, identity,
-            rawQuery,
-            agentResponse, files, true, firstMsg.messageId,
-          );
-          // The failed attempt stored encrypted pending text for the next
-          // message. This retry was accepted, so that recovery must not replay.
-          this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
-        }
+        ask = await this.submitTurn(
+          firstMsg, dest, identity, rawQuery, agentResponse, files, true, firstMsg.messageId, log,
+        );
         for (const m of validMessages) {
           this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
         }
@@ -581,7 +644,7 @@ export class InboundRouter {
             const query = identity.role === "client" ? clientQuery(replay) : promptQlQuery(replay);
             if (!query) continue;
             // Failed history stays in the history repository, not the live retry slot.
-            await this.submit(msg, dest, identity, query, "force_skip", files, false);
+            await this.submitTurn(msg, dest, identity, query, "force_skip", files, false, replay.messageId, this.log);
             this.deps.messages.markRelayed(row.connectionId, row.chatJid, row.messageId);
           } catch {
             this.log.warn("history row relay failed", { corrId: row.messageId, chatJid: maskJid(row.chatJid) });
@@ -595,6 +658,15 @@ export class InboundRouter {
       }
     });
   }
+}
+
+/** Context-only label for a file that is not the last post of a split upload.
+ * No caption and no sender text — those stay on the responding post. */
+function uploadRelayQuery(file: PromptQlFileInput): string {
+  if (file.mime_type.startsWith("image/")) return "(image)";
+  if (file.mime_type.startsWith("audio/")) return "(audio)";
+  if (file.mime_type.startsWith("video/")) return "(video)";
+  return "(file)";
 }
 
 export function promptQlQuery(msg: InboundMessage, _attached = false): string | null {

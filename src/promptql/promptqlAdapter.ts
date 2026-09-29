@@ -52,19 +52,81 @@ const PromptQlFilesSchema = z.array(PromptQlFileInputSchema);
 
 export type PromptQlFileInput = z.infer<typeof PromptQlFileInputSchema>;
 
+const SNIFFED_EXTENSIONS: Record<string, readonly string[]> = {
+  "image/jpeg": [".jpg", ".jpeg"],
+  "image/png": [".png"],
+  "image/webp": [".webp"],
+  "image/gif": [".gif"],
+  "application/pdf": [".pdf"],
+};
+
+/** Magic-byte type. Declared WhatsApp MIME is often missing or `image/jpg`,
+ * and PromptQL's uploader returns `upload_failed` for that mismatch. */
+export function sniffedMediaMime(bytes: Buffer): string | null {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+    bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (bytes.length >= 6) {
+    const gif = bytes.subarray(0, 6).toString("ascii");
+    if (gif === "GIF87a" || gif === "GIF89a") return "image/gif";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-") {
+    return "application/pdf";
+  }
+  return null;
+}
+
+function alignFileName(name: string, mime: string): string {
+  const allowed = SNIFFED_EXTENSIONS[mime];
+  if (!allowed) return name;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : "";
+  if (allowed.includes(ext)) return name;
+  const base = ext ? name.slice(0, dot) : name;
+  return `${base || "whatsapp-media"}${allowed[0]}`;
+}
+
 /** Convert already-downloaded bytes for either a live or replayed post.
  * The caller supplies a safe fallback name and releases the media after ask.
+ * MIME follows the bytes when they are a known image or PDF so the PromptQL
+ * upload is not sent as `application/octet-stream` or `image/jpg`.
  */
 export function promptQlFileFromMedia(
   media: DownloadedMedia,
   fallbackFileName: string,
 ): PromptQlFileInput {
   const bytes = z.instanceof(Buffer).parse(media.bytes);
+  const declared = media.mime?.trim();
+  const sniffed = sniffedMediaMime(bytes);
+  const mime = sniffed
+    ?? (declared?.toLowerCase() === "image/jpg" ? "image/jpeg" : declared)
+    ?? "application/octet-stream";
   return PromptQlFileInputSchema.parse({
-    file_name: media.fileName ?? fallbackFileName,
-    mime_type: media.mime ?? "application/octet-stream",
+    file_name: alignFileName(media.fileName ?? fallbackFileName, mime),
+    mime_type: mime,
     content_base64: bytes.toString("base64"),
   });
+}
+
+/** Decoded size of an ask_promptql file list, for the MCP body budget. */
+export function promptQlUploadRawBytes(files: readonly PromptQlFileInput[]): number {
+  let total = 0;
+  for (const file of files) total += Math.floor((file.content_base64.length * 3) / 4);
+  return total;
 }
 
 /**

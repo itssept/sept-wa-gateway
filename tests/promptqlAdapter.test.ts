@@ -286,6 +286,26 @@ test.each([null, "existing-bot"])("force_skip carries downloaded media on bot %s
   });
 });
 
+test("jpeg bytes are labeled image/jpeg when WhatsApp omitted the mime", () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  expect(promptQlFileFromMedia({
+    bytes, sizeBytes: bytes.length, mime: undefined,
+  }, "whatsapp-image-1")).toEqual({
+    file_name: "whatsapp-image-1.jpg",
+    mime_type: "image/jpeg",
+    content_base64: bytes.toString("base64"),
+  });
+});
+
+test("image/jpg is sent to PromptQL as image/jpeg", () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+  const file = promptQlFileFromMedia({
+    bytes, sizeBytes: bytes.length, mime: "image/jpg", fileName: "bag.jpg",
+  }, "fallback.jpg");
+  expect(file.mime_type).toBe("image/jpeg");
+  expect(file.file_name).toBe("bag.jpg");
+});
+
 test("downloaded media uses fallback metadata and preserves binary bytes", () => {
   expect(promptQlFileFromMedia({
     bytes: Buffer.from("abc"), sizeBytes: 3, mime: undefined,

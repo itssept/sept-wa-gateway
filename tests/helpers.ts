@@ -34,6 +34,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     historyJoinWaitMs: 0,
     inboundDebounceMs: 0,
     relayUnregisteredChats: false,
+    orgCraftInject: false,
+    orgCraftFile: undefined,
+    orgCraftSystemInstruction: undefined,
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

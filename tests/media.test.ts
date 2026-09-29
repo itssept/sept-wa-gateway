@@ -35,6 +35,49 @@ test("detects and classifies supported media without treating text as media", ()
   expect(classifyMessage(image)).toBe("image");
 });
 
+test("repairs a placeholder media host before the CDN fetch", async () => {
+  let seenUrl = "";
+  const downloader = new TransientMediaDownloader(1024, log, async (waMessage) => {
+    const node = waMessage.message?.imageMessage as { url?: string } | undefined;
+    seenUrl = node?.url ?? "";
+    return implementation(Buffer.from("abc"))();
+  });
+  const result = await downloader.download(
+    message({
+      imageMessage: {
+        mimetype: "image/jpeg",
+        url: "https://web.whatsapp.net",
+        directPath: "/v/abc.enc?oh=1",
+        fileLength: 3,
+      },
+    }),
+    socket,
+  );
+  expect(result.status).toBe("ready");
+  expect(seenUrl).toBe("https://mmg.whatsapp.net/v/abc.enc?oh=1");
+});
+
+test("keeps the signed CDN query on directPath so Baileys does not drop it", async () => {
+  let seenPath = "";
+  const downloader = new TransientMediaDownloader(1024, log, async (waMessage) => {
+    const node = waMessage.message?.imageMessage as { directPath?: string } | undefined;
+    seenPath = node?.directPath ?? "";
+    return implementation(Buffer.from("abc"))();
+  });
+  await downloader.download(
+    message({
+      imageMessage: {
+        mimetype: "image/jpeg",
+        url: "https://media-lhr6-1.cdn.whatsapp.net/v/abc.enc?oh=1&mms3=true",
+        directPath: "/v/abc.enc",
+        fileLength: 3,
+      },
+    }),
+    socket,
+  );
+  expect(seenPath).toBe("/v/abc.enc?oh=1&mms3=true");
+});
+
 test("returns downloaded media only in transient memory", async () => {
   const downloader = new TransientMediaDownloader(
     1024,

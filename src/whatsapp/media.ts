@@ -30,6 +30,50 @@ const MEDIA_TYPES = [
   "stickerMessage",
 ] as const;
 
+/**
+ * Hosts that actually serve WhatsApp media bytes. `web.whatsapp.net` shows up
+ * as a placeholder `url` and is not one of them.
+ */
+const MEDIA_CDN_HOST = /^(?:mmg\.whatsapp\.net|media\.whatsapp\.net|.+\.cdn\.whatsapp\.net)$/i;
+
+/**
+ * Baileys 7.0.0-rc14 downloads `https://${host}${directPath}` and, when
+ * `directPath` is set, ignores the signed `url`. A placeholder host
+ * (`web.whatsapp.net`) or a directPath that dropped the signed query makes
+ * the CDN fetch fail or return HTML. PromptQL then answers `upload_failed`
+ * for those bytes. Repair the node before download so the fetch is the URL
+ * WhatsApp actually issued.
+ */
+export function repairWhatsAppMediaMessage(message: WAMessage): void {
+  const content = message.message as Record<string, unknown> | null | undefined;
+  if (!content) return;
+  for (const type of MEDIA_TYPES) {
+    const node = content[type];
+    if (!node || typeof node !== "object") continue;
+    repairMediaNode(node as Record<string, unknown>);
+  }
+}
+
+function repairMediaNode(node: Record<string, unknown>): void {
+  const directPath = typeof node.directPath === "string" ? node.directPath : "";
+  const rawUrl = typeof node.url === "string" ? node.url : "";
+  let parsed: URL | null = null;
+  if (rawUrl.startsWith("https://")) {
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      parsed = null;
+    }
+  }
+  if (parsed && MEDIA_CDN_HOST.test(parsed.host) && parsed.pathname.length > 1) {
+    node.directPath = `${parsed.pathname}${parsed.search}`;
+    return;
+  }
+  if (directPath.startsWith("/")) {
+    node.url = `https://mmg.whatsapp.net${directPath}`;
+  }
+}
+
 const MESSAGE_TYPES: ReadonlyArray<readonly [string, string]> = [
   ["imageMessage", "image"],
   ["videoMessage", "video"],
@@ -155,6 +199,7 @@ export class TransientMediaDownloader {
     socket: Pick<WASocket, "updateMediaMessage">,
   ): Promise<{ status: MediaStatus; media: DownloadedMedia | null }> {
     if (!hasMedia(message)) return { status: "none", media: null };
+    repairWhatsAppMediaMessage(message);
 
     const declared = mediaFileLength(message);
     if (declared != null && declared > this.maxBytes) {
