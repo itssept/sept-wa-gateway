@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { documentCaption, isLifecycleOnlyOutbound, outboundFailureReason, sanitizeOutboundText } from "../src/routing/sanitizer.ts";
+import { documentCaption, isLifecycleOnlyOutbound, isPromptQlEnvelopeOutbound, outboundFailureReason, sanitizeOutboundText } from "../src/routing/sanitizer.ts";
 import { OPERATOR_WELCOME_BASE, OPERATOR_WELCOME_PROMPT } from "../src/domain/welcomeMessage.ts";
 
 describe("gw-04-platform-sanitizer: Baileys outbound message sanitization", () => {
@@ -236,5 +236,39 @@ https://cdn.example.com/awb_12345_label`;
     expect(caption).toContain("* Remember pieces as they come in");
     expect(caption).toContain("Spec line 0");
     expect(caption).not.toContain("Spec line 9");
+  });
+
+  it("P0 2026-09-29: suppresses empty-artifacts completed PromptQL envelope JSON", () => {
+    const live = '{"artifacts":[],"status":"completed","project_name":"p-217696ea-9cb2","warnings":[],"approvals":[]}';
+    const spaced = '{"artifacts": [],"status":"completed","project_name":"p-217696ea-9cb2","warnings":[],"approvals":[]}';
+    expect(isPromptQlEnvelopeOutbound(live)).toBe(true);
+    expect(isPromptQlEnvelopeOutbound(spaced)).toBe(true);
+    expect(sanitizeOutboundText(live)).toBe("");
+    expect(sanitizeOutboundText(`\n${live}\n`)).toBe("");
+    expect(outboundFailureReason(live)).toBe("promptql_envelope");
+  });
+
+  it("suppresses PromptQL envelopes even when a nested message field is present", () => {
+    const withMsg = JSON.stringify({
+      artifacts: [],
+      status: "completed",
+      project_name: "p-217696ea-9cb2",
+      message: "Invoice ready",
+      warnings: [],
+      approvals: [],
+    });
+    expect(isPromptQlEnvelopeOutbound(withMsg)).toBe(true);
+    expect(sanitizeOutboundText(withMsg)).toBe("");
+  });
+
+  it("does not treat ordinary client JSON-looking prose as an envelope", () => {
+    const ok = 'Your order {"sku":"ABC"} is confirmed.';
+    expect(isPromptQlEnvelopeOutbound(ok)).toBe(false);
+    expect(sanitizeOutboundText(ok)).toContain("Your order");
+  });
+
+  it("does not treat a stripe payload mention without status+artifacts as an envelope", () => {
+    const ok = '{"amount":5000,"currency":"usd"}';
+    expect(isPromptQlEnvelopeOutbound(ok)).toBe(false);
   });
 });

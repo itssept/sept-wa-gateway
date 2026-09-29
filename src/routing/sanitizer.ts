@@ -47,6 +47,7 @@ const SAFE_FAILURE_REASONS = new Set([
   "promptql_run_failed",
   "lifecycle_notice",
   "promptql_error",
+  "promptql_envelope",
   "empty response",
   "chat_left",
   "PromptQL did not respond before the deadline.",
@@ -59,6 +60,9 @@ const SAFE_FAILURE_REASONS = new Set([
  */
 export function sanitizeOutboundText(text: string): string {
   if (!text) return "";
+  // Live P0 2026-09-29 ~21:59 Rome: empty-artifacts completed envelope leaked
+  // to WhatsApp as chat text. Drop the whole blob — never forward platform JSON.
+  if (isPromptQlEnvelopeOutbound(text)) return "";
 
   let cleaned = text;
 
@@ -171,6 +175,35 @@ export function isLifecycleOnlyOutbound(text: string): boolean {
 }
 
 /**
+ * True when the outbound body is a PromptQL wait-tool / ask result envelope
+ * (status + artifacts/project_name/approvals/warnings), not concierge copy.
+ * Empty-artifacts completed blobs must never reach WhatsApp as chat text.
+ *
+ * Live P0 (Yara 2026-09-29 21:59 Rome): Chanel photo + "Invoice this." →
+ * {"artifacts":[],"status":"completed","project_name":"p-217696ea-9cb2",...}
+ */
+export function isPromptQlEnvelopeOutbound(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed[0] !== "{" || trimmed[trimmed.length - 1] !== "}") return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.status !== "string" || !obj.status.trim()) return false;
+  const hasArtifacts = Object.prototype.hasOwnProperty.call(obj, "artifacts");
+  const hasProject = typeof obj.project_name === "string" && obj.project_name.length > 0;
+  const hasApprovals = Object.prototype.hasOwnProperty.call(obj, "approvals");
+  const hasWarnings = Object.prototype.hasOwnProperty.call(obj, "warnings");
+  if (!(hasArtifacts || hasProject || hasApprovals || hasWarnings)) return false;
+  // Raw envelope JSON is never concierge copy. Prefer silence (empty sanitize).
+  return true;
+}
+
+/**
  * Reason string safe to log. Server cancel copy and internal URLs never
  * become the logged reason — the failed path does not run the WhatsApp
  * sanitizer, so this is the gate for that string.
@@ -179,6 +212,7 @@ export function outboundFailureReason(message: string): string {
   const trimmed = message.trim();
   if (SAFE_FAILURE_REASONS.has(trimmed)) return trimmed;
   if (/interrupted_due_to_new_trigger/i.test(trimmed)) return "interrupted_due_to_new_trigger";
+  if (isPromptQlEnvelopeOutbound(trimmed)) return "promptql_envelope";
   if (isLifecycleOnlyOutbound(trimmed) || LIFECYCLE_SIGNAL.test(trimmed)) return "lifecycle_notice";
   if (/ql\.app/i.test(trimmed)) return "promptql_run_failed";
   if (trimmed.startsWith("PromptQL error:") || trimmed.startsWith("PromptQL run ")) {

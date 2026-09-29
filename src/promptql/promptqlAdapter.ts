@@ -363,6 +363,48 @@ function looksLikeCancelBanner(value: string): boolean {
 }
 
 /**
+ * MCP often duplicates structuredContent into content[].text as a JSON string.
+ * When `message` is missing, waitForResponse used to fall back to that text —
+ * which is how empty-artifacts completed envelopes reached WhatsApp (P0 2026-09-29).
+ */
+export function clientFacingWaitMessage(
+  structuredMessage: unknown,
+  fallbackText: string,
+): string {
+  if (typeof structuredMessage === "string" && structuredMessage.trim()) {
+    return structuredMessage;
+  }
+  const text = typeof fallbackText === "string" ? fallbackText.trim() : "";
+  if (!text) return "";
+  if (text[0] === "{" && text[text.length - 1] === "}") {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        typeof parsed.status === "string" &&
+        (
+          Object.prototype.hasOwnProperty.call(parsed, "artifacts") ||
+          typeof parsed.project_name === "string" ||
+          Object.prototype.hasOwnProperty.call(parsed, "approvals") ||
+          Object.prototype.hasOwnProperty.call(parsed, "warnings")
+        )
+      ) {
+        // Prefer nested message if the envelope somehow wrapped one.
+        if (typeof parsed.message === "string" && parsed.message.trim()) {
+          return parsed.message;
+        }
+        return "";
+      }
+    } catch {
+      // Not JSON — treat as ordinary client text.
+    }
+  }
+  return text;
+}
+
+/**
  * Map a wait-tool payload to a stable failure code. The server `message` is
  * intentionally ignored: it is the operator-facing cancel banner plus ql.app
  * permalinks, and must not leave this adapter.
@@ -532,7 +574,7 @@ export class PromptQlAdapter {
         artifacts?: unknown;
       };
       const status = (typeof sc.status === "string" ? sc.status : "").trim().toLowerCase();
-      const message = (typeof sc.message === "string" ? sc.message : "") || result.text || "";
+      const message = clientFacingWaitMessage(sc.message, result.text || "");
 
       if (status === "waiting_approval") {
         await this.declineAll(session, sc.approvals ?? []);
