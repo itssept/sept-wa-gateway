@@ -1,0 +1,20 @@
+[
+  {
+    "category": "invoice_pattern",
+    "playbook_key": "invoice_pdf_luxury_caption",
+    "title": "Luxury WA invoice: branded PDF + plain caption",
+    "instructions": "When an operator asks for an invoice/receipt/payment doc on WA:\n1) Generate branded SEPT PDF via generate_invoice_pdf / deal_execution (ReportLab). Identifier sept_invoice_<deal_id>.\n2) Emit ONLY <artifact type=\"file\" identifier=\"sept_invoice_<deal_id>\" /> — never json/md/html table, never ql.app/l/ permalinks.\n3) WA caption = one short plain sentence + the PDF. No markdown headers/bullets/code ticks.\n4) Settlement details come from authenticated operator profile only. NEVER ask for Stripe/QuickBooks/Xero/VAT credentials in chat.\n5) Do not share deal/operator private data into org craft learning — only the procedural pattern."
+  },
+  {
+    "category": "item_id",
+    "playbook_key": "item_id_grounded_search",
+    "title": "Item ID: search before answer; never invent retail channels",
+    "instructions": "On product image / ID ask:\n1) Search the operator ledger / chat inventory before answering. Do not answer from ungrounded visual guess alone.\n2) If nothing found: say clearly no match / nothing through the groups yet. Never invent Vestiaire, RealReal, Fashionphile, eBay, Harrods, Mytheresa, Bergdorf, or boutique stock as sourcing channels.\n3) Preserve sourcer-stated collection/season/year as stated_by_sourcer; do not override with visual inference.\n4) Shared craft may include recognition heuristics and sizing conventions — never identities or deal amounts."
+  },
+  {
+    "category": "sizing",
+    "playbook_key": "sizing_eu_narrow_notes",
+    "title": "Sizing craft: EU conventions + narrow-fit notes (no seat PII)",
+    "instructions": "Procedural sizing craft only:\n1) Record EU / US / IT size as stated; mark provenance (stated_by_operator / observed_in_chat / estimated_by_agent).\n2) House conventions (e.g. some EU 41 runs narrow) are craft — shareable. A specific seat's size history is private — never put in org craft.\n3) When ambiguous, ask one short clarification rather than guessing into the ledger."
+  }
+]

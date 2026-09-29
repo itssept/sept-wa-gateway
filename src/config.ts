@@ -128,6 +128,14 @@ const EnvSchema = z.object({
     .positive()
     .max(16 * 1024 * 1024, "PROMPTQL_MAX_ARTIFACT_BYTES must not exceed 16 MiB")
     .default(16 * 1024 * 1024),
+
+  // Issue #25 — shared craft on ask_promptql system_instruction. No DDL.
+  // On by default so a new seat is not a blank brain. Set false to disable.
+  // Inline text or ORG_CRAFT_FILE overrides the bundled playbook pack.
+  ORG_CRAFT_INJECT: z.enum(["true", "false"]).default("true")
+    .transform((value) => value === "true"),
+  ORG_CRAFT_FILE: z.string().optional(),
+  ORG_CRAFT_SYSTEM_INSTRUCTION: z.string().optional(),
 }).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
   path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
   message: "must be greater than or equal to WHATSAPP_PA_REPLY_DELAY_MIN_MS",
@@ -157,6 +165,11 @@ export interface Config {
   inboundDebounceMs: number;
   /** Relay ownerless (unregistered/unqualified) chats to the common room. */
   relayUnregisteredChats: boolean;
+
+  /** Issue #25: inject shared craft into ask_promptql system_instruction. */
+  orgCraftInject: boolean;
+  orgCraftFile: string | undefined;
+  orgCraftSystemInstruction: string | undefined;
 
   mcp: {
     /** Full MCP endpoint URL (scheme + host + path + query). Empty until configured. */
@@ -208,6 +221,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
     inboundDebounceMs: e.WHATSAPP_INBOUND_DEBOUNCE_MS,
     relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
+
+    orgCraftInject: e.ORG_CRAFT_INJECT,
+    orgCraftFile: e.ORG_CRAFT_FILE || undefined,
+    orgCraftSystemInstruction: e.ORG_CRAFT_SYSTEM_INSTRUCTION || undefined,
 
     mcp: {
       endpoint: e.PROMPTQL_MCP_URL,

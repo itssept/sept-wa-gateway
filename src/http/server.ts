@@ -11,6 +11,7 @@ import { createContext } from "../context.ts";
 import { WhatsAppConnection } from "../whatsapp/socket.ts";
 import { AntiBanQueue } from "../whatsapp/antiBan.ts";
 import { InboundRouter } from "../routing/inboundRouter.ts";
+import { loadOrgCraftSystemInstruction } from "../craft/orgCraft.ts";
 import { OutboundDispatcher } from "../routing/outboundDispatcher.ts";
 import { makeHandler } from "./adminApi.ts";
 import { rootLogger } from "../logger.ts";
@@ -79,6 +80,17 @@ async function main(): Promise<void> {
     ctx.welcomeLog,
   );
 
+  const orgCraftSystemInstruction = loadOrgCraftSystemInstruction({
+    enabled: config.orgCraftInject,
+    inlineInstruction: config.orgCraftSystemInstruction,
+    filePath: config.orgCraftFile,
+    useDefaults: true,
+  });
+  log.info("org craft inject", {
+    enabled: Boolean(orgCraftSystemInstruction),
+    textLength: orgCraftSystemInstruction?.length ?? 0,
+  });
+
   router = new InboundRouter(
     ctx.resolver,
     ctx.adapter,
@@ -96,6 +108,7 @@ async function main(): Promise<void> {
       reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),
       relayUnregisteredChats: config.relayUnregisteredChats,
       inboundDebounceMs: config.inboundDebounceMs,
+      orgCraftSystemInstruction,
     },
   );
 

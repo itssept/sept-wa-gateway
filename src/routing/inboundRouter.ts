@@ -36,6 +36,8 @@ export interface RoutingDeps {
   relayUnregisteredChats?: boolean;
   /** Inbound debouncing window in milliseconds (0 = disabled). */
   inboundDebounceMs?: number;
+  /** Issue #25: preformatted shared-craft system_instruction (craft-only, no PII). */
+  orgCraftSystemInstruction?: string;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -351,9 +353,11 @@ export class InboundRouter {
     // destination. Keep the old mapping until MCP returns a new handle.
     const promoting = existing?.shopperId === null && dest.ownerId !== null;
     try {
+      const systemInstruction = this.deps.orgCraftSystemInstruction || undefined;
       const ask = await this.adapter.ask(identity, {
         query, threadId: promoting ? null : existing?.threadId ?? null,
         roomName: !existing || promoting ? dest.roomName : null, agentResponse, files,
+        ...(systemInstruction ? { systemInstruction } : {}),
       });
       this.remember(msg, dest, ask);
       return ask;
