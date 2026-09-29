@@ -6,6 +6,12 @@ import {
   AskSubmissionError, promptQlFileFromMedia, promptQlUploadRawBytes,
   type PromptQlAdapter, type PromptQlFileInput, type PostingIdentity, type AskResult,
 } from "../promptql/promptqlAdapter.ts";
+import {
+  normalizePromptQlFile, recompressPromptQlFile, isImagePromptQlFile, promptQlFileMeta,
+} from "../promptql/mediaFiles.ts";
+import {
+  type EphemeralMediaStore, ephemeralMediaUrl,
+} from "../http/ephemeralMedia.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { ChatBotRepo, ChatBot } from "../storage/chatBotRepo.ts";
 import type { MessageStore, StoredHistoryMessage } from "../storage/messageStore.ts";
@@ -38,6 +44,10 @@ export interface RoutingDeps {
   inboundDebounceMs?: number;
   /** Issue #25: preformatted shared-craft system_instruction (craft-only, no PII). */
   orgCraftSystemInstruction?: string;
+  /** Optional ephemeral media bridge for PromptQL fetch-fallback after upload_failed. */
+  ephemeralMedia?: EphemeralMediaStore;
+  /** Public origin for bridge URLs (empty = bridge disabled). */
+  publicBaseUrl?: string;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -305,10 +315,9 @@ export class InboundRouter {
         this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
         return ask;
       }
-      log.warn("ask upload_failed; retrying once", { status: err.status, fileCount: files.length });
-      const ask = await this.submit(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
-      this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
-      return ask;
+      // Single-file upload_failed: do not retry here. submitMediaAsk owns the
+      // backoff / recompress / ephemeral-bridge ladder so we do not double-retry.
+      throw err;
     }
   }
 
@@ -500,10 +509,13 @@ export class InboundRouter {
       shopperMediaAsk = identity.role === "shopper" && hadReadyMedia && !firstMsg.fromMe;
       const agentResponse = (shopperTrigger && !isGreetingFirstDM) ? "force_respond" as const : "force_skip" as const;
 
+      // Normalize mime/filename before the first ask (strip ;params, sniff magic).
+      for (let i = 0; i < files.length; i++) files[i] = normalizePromptQlFile(files[i]!);
+
       let ask: AskResult;
       try {
-        ask = await this.submitTurn(
-          firstMsg, dest, identity, rawQuery, agentResponse, files, true, firstMsg.messageId, log,
+        ask = await this.submitMediaAsk(
+          firstMsg, dest, identity, rawQuery, agentResponse, files, log,
         );
         for (const m of validMessages) {
           this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
@@ -658,6 +670,149 @@ export class InboundRouter {
       }
     });
   }
+  /**
+   * Submit an ask that may carry media. Live PromptQL MCP staging can return
+   * upload_failed even when Baileys download + gateway DNS succeed (observed
+   * 2026-09-28 Dior + 2026-09-29 Chanel). Ladder:
+   *   1) normalized files
+   *   2) backoff + same files
+   *   3) recompressed JPEG (images) + backoff
+   *   4) ephemeral media bridge URL (no files[]) so PromptQL can fetch the bytes
+   * A successful attempt clears pending_post so text recovery does not replay.
+   */
+  private async submitMediaAsk(
+    firstMsg: InboundMessage,
+    dest: Destination,
+    identity: PostingIdentity,
+    rawQuery: string,
+    agentResponse: "force_skip" | "force_respond",
+    files: PromptQlFileInput[],
+    log: Logger,
+  ): Promise<AskResult> {
+    const hadReadyMedia = files.length > 0;
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+    const tryFiles = async (payload: PromptQlFileInput[], label: string): Promise<AskResult> => {
+      for (const f of payload) {
+        log.info("ask media payload", { phase: label, ...promptQlFileMeta(f) });
+      }
+      // submitTurn keeps the #30 multi-file one-by-one split. Single-file
+      // upload_failed is rethrown so this ladder owns backoff / recompress / bridge.
+      return this.submitTurn(
+        firstMsg, dest, identity, rawQuery, agentResponse, payload, true, firstMsg.messageId, log,
+      );
+    };
+
+    try {
+      return await tryFiles(files, "normalized");
+    } catch (err) {
+      if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || !hadReadyMedia) {
+        throw err;
+      }
+      log.warn("ask upload_failed; retrying after backoff", {
+        status: err.status, detailCode: err.detailCode, fileCount: files.length, attempt: 2,
+      });
+      await sleep(800);
+      try {
+        const ask = await tryFiles(files, "retry");
+        this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
+        return ask;
+      } catch (err2) {
+        if (!(err2 instanceof AskSubmissionError) || err2.status !== "upload_failed") throw err2;
+        let last: AskSubmissionError = err2;
+
+        const recompressed = files.map((f) =>
+          isImagePromptQlFile(f) ? recompressPromptQlFile(f) : f,
+        );
+        const changed = recompressed.some((f, i) => f.content_base64 !== files[i]!.content_base64);
+        if (changed) {
+          log.warn("ask upload_failed; retrying with recompressed image", {
+            status: last.status, detailCode: last.detailCode, attempt: 3,
+          });
+          await sleep(500);
+          try {
+            const ask = await tryFiles(recompressed, "recompress");
+            this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
+            return ask;
+          } catch (err3) {
+            if (!(err3 instanceof AskSubmissionError) || err3.status !== "upload_failed") throw err3;
+            last = err3;
+          }
+        }
+
+        const bridged = await this.tryEphemeralBridgeAsk(
+          firstMsg, dest, identity, rawQuery, agentResponse, files, log,
+        );
+        if (bridged) {
+          this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
+          return bridged;
+        }
+        throw last;
+      }
+    }
+  }
+
+  /** Host media on the public gateway URL and ask PromptQL to fetch it (no files[]). */
+  private async tryEphemeralBridgeAsk(
+    firstMsg: InboundMessage,
+    dest: Destination,
+    identity: PostingIdentity,
+    rawQuery: string,
+    agentResponse: "force_skip" | "force_respond",
+    files: PromptQlFileInput[],
+    log: Logger,
+  ): Promise<AskResult | null> {
+    const store = this.deps.ephemeralMedia;
+    const base = (this.deps.publicBaseUrl ?? "").trim();
+    if (!store || !base || files.length === 0) {
+      log.warn("ephemeral media bridge unavailable", {
+        hasStore: Boolean(store), hasPublicBaseUrl: Boolean(base),
+      });
+      return null;
+    }
+    const urls: string[] = [];
+    for (const f of files) {
+      const token = store.put({
+        bytes: Buffer.from(f.content_base64, "base64"),
+        mimeType: f.mime_type,
+        fileName: f.file_name,
+      });
+      urls.push(ephemeralMediaUrl(base, token));
+    }
+    const urlBlock = urls.map((u, i) => `Photo ${i + 1} URL: ${u}`).join("\n");
+    const bridgedQuery =
+      `[Attached photo via gateway media bridge — MCP files[] upload_failed]\n` +
+      `${urlBlock}\n` +
+      `Fetch each URL and treat the image as the operator's WhatsApp photo attachment ` +
+      `for item identification / invoice generation.\n` +
+      `Operator message:\n${rawQuery}`;
+    const bridgeInstruction =
+      "When a message includes a gateway media bridge photo URL, fetch that URL and " +
+      "treat the image as the operator's WhatsApp photo attachment. Do not ask the " +
+      "operator to resend the photo unless the URL fetch fails. Never repeat the " +
+      "media bridge URL in your reply.";
+    log.warn("ask upload_failed; falling back to ephemeral media bridge", {
+      fileCount: files.length, urlCount: urls.length,
+    });
+    try {
+      // Bridge instruction rides in the query so it reaches the agent even when
+      // org craft is unset. submit still merges orgCraftSystemInstruction.
+      // rememberFailure stays false: the file attempts already stored the
+      // operator text. A failed bridge must not replace that with a bearer URL.
+      return await this.submit(
+        firstMsg, dest, identity,
+        `${bridgeInstruction}\n\n${bridgedQuery}`,
+        agentResponse, [], false, firstMsg.messageId,
+      );
+    } catch (err) {
+      log.warn("ephemeral media bridge ask failed", {
+        errName: err instanceof Error ? err.name : "unknown",
+        status: err instanceof AskSubmissionError ? err.status : null,
+      });
+      return null;
+    }
+  }
+
 }
 
 /** Context-only label for a file that is not the last post of a split upload.

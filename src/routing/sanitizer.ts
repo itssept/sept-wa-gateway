@@ -81,6 +81,12 @@ export function sanitizeOutboundText(text: string): string {
     /(?<![\w.])(?:https?:\/\/)?(?:[a-z0-9-]+\.)*ql\.app(?:\/[^\s)\]>]*)?/gi,
     "",
   );
+  // Ephemeral media bridge URLs are bearer tokens. A model that echoes the
+  // fetch URL must not deliver that credential into the WhatsApp chat.
+  cleaned = cleaned.replace(
+    /https?:\/\/[^\s)\]>]*\/api\/v1\/ephemeral-media\/[a-f0-9]{48}\b/gi,
+    "",
+  );
   cleaned = stripRunIdentifiers(cleaned);
   cleaned = stripLifecycleCopy(cleaned);
 

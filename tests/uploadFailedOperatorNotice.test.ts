@@ -188,3 +188,117 @@ test("text upload_failed does not retry or notify", async () => {
   expect(app.calls).toHaveLength(1);
   expect(app.notices).toHaveLength(0);
 });
+
+test("upload_failed then ephemeral bridge ask (no files) succeeds", async () => {
+  const { EphemeralMediaStore } = await import("../src/http/ephemeralMedia.ts");
+  const app = makeTestApp();
+  const { ctx } = app;
+  ctx.gatewaySettings.set("client-token", "common-room");
+  const a = ctx.shoppers.register("Yara", "+97336663062", "operator-yara-aldhaen").shopper;
+  ctx.credentials.setActive(a.id, `shopper-${a.id}`);
+
+  const store = new EphemeralMediaStore();
+  const calls: Array<{ identity: PostingIdentity; input: any }> = [];
+  let fileAttempts = 0;
+
+  const adapter = {
+    ask: async (identity: PostingIdentity, input: any) => {
+      calls.push({ identity, input: structuredClone(input) });
+      if (input.files?.length) {
+        fileAttempts += 1;
+        throw new AskSubmissionError("upload_failed", { threadId: "partial-bot", threadEventId: null }, "staging_error");
+      }
+      // Bridge ask: no files, query carries the URL.
+      expect(String(input.query)).toContain("/api/v1/ephemeral-media/");
+      expect(String(input.query)).toContain("Invoice for this");
+      return { threadId: "bridge-bot", threadEventId: "evt-bridge" };
+    },
+  };
+
+  const notices: Array<{ connectionId: string; chatJid: string; text: string }> = [];
+  const router = new InboundRouter(
+    ctx.resolver,
+    adapter as never,
+    ctx.workflows,
+    ctx.chatBots,
+    ctx.outboundLog,
+    {
+      dispatch: async () => undefined,
+      dispatchDirectText: async () => undefined,
+      notifyChat: async (input: { connectionId: string; chatJid: string; text: string }) => {
+        notices.push(input);
+      },
+    } as never,
+    ctx.audit,
+    ctx.log,
+    {
+      settings: ctx.gatewaySettings,
+      messages: ctx.messages,
+      getGroup: async () => null,
+      prepareHistory: async () => null,
+      reactToMessage: async () => undefined,
+      relayUnregisteredChats: true,
+      inboundDebounceMs: 0,
+      ephemeralMedia: store,
+      publicBaseUrl: "http://gateway.test:8790",
+    },
+  );
+
+  const msg = imageMsg("img-bridge-1");
+  (msg as any).text = "Invoice for this";
+  await router.handle(msg);
+
+  expect(fileAttempts).toBeGreaterThanOrEqual(2);
+  expect(calls.some((c) => !c.input.files?.length)).toBe(true);
+  expect(notices).toHaveLength(0);
+  expect(ctx.chatBots.pendingPost("test-conn", "97336663062@s.whatsapp.net")).toBeNull();
+  app.db.close();
+});
+
+test("failed ephemeral bridge does not store the bearer URL as pending text", async () => {
+  const { EphemeralMediaStore } = await import("../src/http/ephemeralMedia.ts");
+  const app = setup();
+  const store = new EphemeralMediaStore();
+  const router = new InboundRouter(
+    app.ctx.resolver,
+    {
+      ask: async () => {
+        throw new AskSubmissionError(
+          "upload_failed",
+          { threadId: "partial-bot", threadEventId: null },
+          "staging_error",
+        );
+      },
+    } as never,
+    app.ctx.workflows,
+    app.ctx.chatBots,
+    app.ctx.outboundLog,
+    {
+      dispatch: async () => undefined,
+      dispatchDirectText: async () => undefined,
+      notifyChat: async (input: { connectionId: string; chatJid: string; text: string }) => {
+        app.notices.push(input);
+      },
+    } as never,
+    app.ctx.audit,
+    app.ctx.log,
+    {
+      settings: app.ctx.gatewaySettings,
+      messages: app.ctx.messages,
+      getGroup: async () => null,
+      prepareHistory: async () => null,
+      reactToMessage: async () => undefined,
+      relayUnregisteredChats: true,
+      inboundDebounceMs: 0,
+      ephemeralMedia: store,
+      publicBaseUrl: "http://gateway.test:8790",
+    },
+  );
+  const msg = imageMsg("img-bridge-fail");
+  (msg as { text: string }).text = "Invoice for this";
+  await router.handle(msg);
+  const pending = app.ctx.chatBots.pendingPost("test-conn", DM);
+  expect(pending?.query).toBe("Invoice for this");
+  expect(pending?.query ?? "").not.toContain("ephemeral-media");
+  expect(app.notices).toHaveLength(1);
+});

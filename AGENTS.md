@@ -149,7 +149,10 @@ are covered by mocked boundary tests, not a live shopper-token test.
 ## Security invariants
 
 - **Every `/api/v1/*` endpoint requires the admin token** (`GATEWAY_ADMIN_TOKEN`,
-  constant-time compare). The tunnel URL is never a security boundary.
+  constant-time compare), except `GET /api/v1/ephemeral-media/:token`. That
+  route is the PromptQL fetch bridge for `upload_failed`: 48-hex unguessable
+  token, single-use, 15-minute TTL, no admin header. Never log the token or
+  the URL. The tunnel URL is never a security boundary.
 - The admin credential is separate from PromptQL MCP credentials and from
   per-shopper tokens.
 - **Secrets are encrypted at rest** (Baileys session state, per-shopper MCP
