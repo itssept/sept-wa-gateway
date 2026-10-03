@@ -7,10 +7,10 @@ import {
   type PromptQlAdapter, type PromptQlFileInput, type PostingIdentity, type AskResult,
 } from "../promptql/promptqlAdapter.ts";
 import {
-  normalizePromptQlFile, recompressPromptQlFile, isImagePromptQlFile, promptQlFileMeta,
+  normalizePromptQlFile, recompressPromptQlFile, recompressForBridge, isImagePromptQlFile, promptQlFileMeta,
 } from "../promptql/mediaFiles.ts";
 import {
-  type EphemeralMediaStore, ephemeralMediaUrl,
+  type EphemeralMediaStore, ephemeralMediaUrl, publicBaseUrlUsesNonStandardPort,
 } from "../http/ephemeralMedia.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { ChatBotRepo, ChatBot } from "../storage/chatBotRepo.ts";
@@ -770,12 +770,22 @@ export class InboundRouter {
       });
       return null;
     }
+    if (publicBaseUrlUsesNonStandardPort(base)) {
+      // Live 2026-09-30: PromptQL Cloud could not fetch :8790 ("photo link could
+      // not be loaded"). Prefer Caddy/TLS on :80/:443 for GATEWAY_PUBLIC_BASE_URL.
+      log.warn("ephemeral media bridge public base uses non-standard port", {
+        hint: "set GATEWAY_PUBLIC_BASE_URL to http(s)://host without :8790 (Caddy :80/:443)",
+      });
+    }
     const urls: string[] = [];
     for (const f of files) {
+      const bridgedFile = isImagePromptQlFile(f) ? recompressForBridge(f) : f;
       const token = store.put({
-        bytes: Buffer.from(f.content_base64, "base64"),
-        mimeType: f.mime_type,
-        fileName: f.file_name,
+        bytes: Buffer.from(bridgedFile.content_base64, "base64"),
+        mimeType: bridgedFile.mime_type,
+        fileName: bridgedFile.file_name,
+        // Multi-fetch: PromptQL may HEAD then GET, or retry the URL.
+        maxFetches: 8,
       });
       urls.push(ephemeralMediaUrl(base, token));
     }
@@ -783,16 +793,17 @@ export class InboundRouter {
     const bridgedQuery =
       `[Attached photo via gateway media bridge — MCP files[] upload_failed]\n` +
       `${urlBlock}\n` +
-      `Fetch each URL and treat the image as the operator's WhatsApp photo attachment ` +
-      `for item identification / invoice generation.\n` +
+      `Fetch each URL (HTTP GET) and treat the image as the operator's WhatsApp photo attachment ` +
+      `for item identification / invoice generation. The URL is token-gated and short-lived.\n` +
       `Operator message:\n${rawQuery}`;
     const bridgeInstruction =
-      "When a message includes a gateway media bridge photo URL, fetch that URL and " +
+      "When a message includes a gateway media bridge photo URL, fetch that URL with HTTP GET and " +
       "treat the image as the operator's WhatsApp photo attachment. Do not ask the " +
       "operator to resend the photo unless the URL fetch fails. Never repeat the " +
       "media bridge URL in your reply.";
     log.warn("ask upload_failed; falling back to ephemeral media bridge", {
       fileCount: files.length, urlCount: urls.length,
+      nonStandardPort: publicBaseUrlUsesNonStandardPort(base),
     });
     try {
       // Bridge instruction rides in the query so it reaches the agent even when

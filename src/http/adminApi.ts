@@ -124,9 +124,25 @@ export function makeHandler(deps: ApiDeps): (req: Request) => Promise<Response> 
     }
 
     // Token-gated ephemeral media bridge (no admin auth — token is the secret).
+    // HEAD peeks without burning a fetch (PromptQL / proxies often probe first).
+    // A HEAD that fell through here used to hit admin auth and return 401, so
+    // PromptQL aborted before GET (US seat photo, GitHub #35).
     const ephemeralToken = isEphemeralMediaPath(url.pathname);
-    if (ephemeralToken && req.method === "GET") {
+    if (ephemeralToken && (req.method === "GET" || req.method === "HEAD")) {
       if (!ephemeralMedia) return err(404, "not found");
+      if (req.method === "HEAD") {
+        const peeked = ephemeralMedia.peek(ephemeralToken);
+        if (!peeked) return err(404, "not found");
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Content-Type": safeContentType(peeked.mimeType),
+            "Content-Length": String(peeked.bytes.length),
+            "Cache-Control": "no-store",
+            "Content-Disposition": contentDispositionInline(peeked.fileName),
+          },
+        });
+      }
       const entry = ephemeralMedia.take(ephemeralToken);
       if (!entry) return err(404, "not found");
       return new Response(entry.bytes, {

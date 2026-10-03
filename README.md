@@ -77,9 +77,9 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   `(Attachment too large to send)` or `(Attachment couldn't be retrieved)`. The
   text reply is always delivered regardless.
 - Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`, except
-  `GET /api/v1/ephemeral-media/:token` (single-use fetch bridge when PromptQL
+  `GET` and `HEAD /api/v1/ephemeral-media/:token` (short-lived multi-fetch bridge when PromptQL
   `files[]` staging returns `upload_failed`). Set `GATEWAY_PUBLIC_BASE_URL` to
-  an origin PromptQL Cloud can reach (SFO3: `http://64.225.89.130:8790`) or
+  an origin PromptQL Cloud can reach on **:80 or :443** (SFO3 via Caddy: `http://64.225.89.130`, not `:8790`) or
   the bridge stays off and the operator gets the resend notice. Missing Client
   setup drops Client traffic with an audit/log, without a WhatsApp reply.
 

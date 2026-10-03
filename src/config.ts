@@ -139,7 +139,8 @@ const EnvSchema = z.object({
 
   // Public base URL of THIS gateway (scheme+host[:port], no trailing slash), used
   // to build ephemeral media bridge URLs when ask_promptql.files staging fails.
-  // Example: http://64.225.89.130:8790 — must be reachable from PromptQL Cloud.
+  // Example: http://64.225.89.130 — must be reachable from PromptQL Cloud.
+  // Prefer :80/:443. PromptQL Cloud egress often cannot fetch :8790.
   GATEWAY_PUBLIC_BASE_URL: z.string().url().or(z.literal("")).default(""),
 }).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
   path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
