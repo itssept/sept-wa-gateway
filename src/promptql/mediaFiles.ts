@@ -15,6 +15,9 @@ const IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"
 /** Target max decoded bytes after recompress (leaves headroom under MCP 10 MiB). */
 const RECOMPRESS_MAX_BYTES = 900 * 1024;
 const RECOMPRESS_MAX_EDGE = 1600;
+/** Smaller target for the ephemeral URL bridge (faster PromptQL fetch). */
+const BRIDGE_MAX_BYTES = 220 * 1024;
+const BRIDGE_MAX_EDGE = 1280;
 
 export function baseMime(mime: string | null | undefined): string {
   const raw = (mime ?? "application/octet-stream").split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
@@ -148,6 +151,56 @@ export function recompressPromptQlFile(file: PromptQlFileInput): PromptQlFileInp
     return normalized;
   } catch {
     return normalized;
+  }
+}
+
+/**
+ * Aggressively recompress images for the ephemeral media bridge so PromptQL
+ * Cloud can fetch a small payload over GATEWAY_PUBLIC_BASE_URL.
+ * Non-images returned normalized; failures fall back to recompressPromptQlFile.
+ */
+export function recompressForBridge(file: PromptQlFileInput): PromptQlFileInput {
+  const normalized = normalizePromptQlFile(file);
+  if (normalized.mime_type !== "image/jpeg") {
+    return normalized;
+  }
+  const bytes = Buffer.from(normalized.content_base64, "base64");
+  if (bytes.length <= BRIDGE_MAX_BYTES) return normalized;
+  try {
+    const decoded = jpeg.decode(bytes, { useTArray: true, formatAsRGBA: true });
+    if (!decoded?.data || !decoded.width || !decoded.height) {
+      return recompressPromptQlFile(normalized);
+    }
+    let best: Buffer | null = null;
+    for (const maxEdge of [BRIDGE_MAX_EDGE, 1024, 800, 640]) {
+      const { width, height } = scaleDims(decoded.width, decoded.height, maxEdge);
+      const rgba = width === decoded.width && height === decoded.height
+        ? decoded.data
+        : resizeRgba(decoded.data as Uint8Array, decoded.width, decoded.height, width, height);
+      for (const quality of [60, 45, 35, 28]) {
+        const encoded = jpeg.encode({ data: rgba, width, height }, quality);
+        if (!encoded?.data?.length) continue;
+        const out = Buffer.from(encoded.data);
+        if (!best || out.length < best.length) best = out;
+        if (out.length <= BRIDGE_MAX_BYTES) {
+          return {
+            file_name: ensureFileName(normalized.file_name, "image/jpeg"),
+            mime_type: "image/jpeg",
+            content_base64: out.toString("base64"),
+          };
+        }
+      }
+    }
+    if (best && best.length < bytes.length) {
+      return {
+        file_name: ensureFileName(normalized.file_name, "image/jpeg"),
+        mime_type: "image/jpeg",
+        content_base64: best.toString("base64"),
+      };
+    }
+    return recompressPromptQlFile(normalized);
+  } catch {
+    return recompressPromptQlFile(normalized);
   }
 }
 

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import jpeg from "jpeg-js";
 import {
-  normalizePromptQlFile, recompressPromptQlFile, baseMime, promptQlFileMeta,
+  normalizePromptQlFile, recompressPromptQlFile, recompressForBridge, baseMime, promptQlFileMeta,
 } from "../src/promptql/mediaFiles.ts";
 
 function tinyJpeg(width = 8, height = 8, quality = 90): Buffer {
@@ -55,4 +55,31 @@ test("recompressPromptQlFile shrinks large JPEG", () => {
   expect(meta.mime).toBe("image/jpeg");
   expect(meta.bytes).toBeLessThan(bytes.length);
   expect(meta.bytes).toBeLessThanOrEqual(900 * 1024);
+});
+
+test("recompressForBridge leaves a small JPEG unchanged and shrinks a large one", () => {
+  const small = tinyJpeg(32, 32, 40);
+  expect(small.length).toBeLessThanOrEqual(220 * 1024);
+  const unchanged = recompressForBridge({
+    file_name: "small.jpg",
+    mime_type: "image/jpeg",
+    content_base64: small.toString("base64"),
+  });
+  expect(unchanged.content_base64).toBe(small.toString("base64"));
+
+  const width = 900;
+  const height = 900;
+  const data = new Uint8Array(width * height * 4);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 17) & 255;
+  const bytes = Buffer.from(jpeg.encode({ data, width, height }, 95).data);
+  expect(bytes.length).toBeGreaterThan(220 * 1024);
+  const out = recompressForBridge({
+    file_name: "bridge.jpg",
+    mime_type: "image/jpeg",
+    content_base64: bytes.toString("base64"),
+  });
+  const meta = promptQlFileMeta(out);
+  expect(meta.mime).toBe("image/jpeg");
+  expect(meta.bytes).toBeLessThanOrEqual(220 * 1024);
+  expect(meta.bytes).toBeLessThan(bytes.length);
 });

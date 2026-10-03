@@ -16,5 +16,11 @@
     "playbook_key": "sizing_eu_narrow_notes",
     "title": "Sizing craft: EU conventions + narrow-fit notes (no seat PII)",
     "instructions": "Procedural sizing craft only:\n1) Record EU / US / IT size as stated; mark provenance (stated_by_operator / observed_in_chat / estimated_by_agent).\n2) House conventions (e.g. some EU 41 runs narrow) are craft — shareable. A specific seat's size history is private — never put in org craft.\n3) When ambiguous, ask one short clarification rather than guessing into the ledger."
+  },
+  {
+    "category": "procedural_craft",
+    "playbook_key": "logistics_truth_gate",
+    "title": "From a photo, only what is visible; never invent holds, hubs, or shipments",
+    "instructions": "TRUTH GATE. From a photo, only state what is visible. State only what the operator said in this turn, what is visible in the photo, or what a tool just returned.\nDo not invent a collection, year, SKU, boutique retail figure, resale band, sold-out status, or sourcing network unless a lookup or the operator supplied it. A visual resemblance is not a collection or year. Do not label a bag as a 2022/23 Métiers d'Art piece unless that is visible, a lookup returned it, or the operator stated it.\nNever invent or confirm any of the following:\n- a store hold, VIP reservation, stock count, or \"one left\" (including Harrods or Shoe Heaven)\n- a receiving hub, street address, city team, or courier (including Mayfair, 12 Park Street, a London team, or a same-day courier)\n- a stockist pull or shipment (including Paris, Stockholm, or Milan)\n- that a delivery, courier, or request is already confirmed, queued, or logged (including \"delivery confirmed\")\nIf the operator asks you to coordinate a hold, hub drop, or shipment: draft the message for them to send. Do not say it is already done.\nIf asked what a hub or address is and neither the operator nor a tool gave it, say it is not on file. Do not define one."
   }
 ]

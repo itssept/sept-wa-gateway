@@ -18,6 +18,14 @@ test("default seeds format without PII reject", () => {
   expect(text).toContain("invoice_pdf_luxury_caption");
   expect(text).toContain("item_id_grounded_search");
   expect(text).toContain("sizing_eu_narrow_notes");
+  expect(text).toContain("logistics_truth_gate");
+  expect(text).toContain("12 Park Street");
+  expect(text).toContain("Do not say it is already done.");
+  expect(text).toContain("only state what is visible");
+  expect(text).toContain("Métiers d'Art");
+  expect(text).toContain("sold-out status");
+  expect(text).toContain("resale band");
+  expect(text).toContain("delivery confirmed");
   expect(text).not.toMatch(/\b(client_|phone|price|margin|quote|bank_)\b/i);
 });
 
