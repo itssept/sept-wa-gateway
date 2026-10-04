@@ -3,7 +3,7 @@
     "category": "invoice_pattern",
     "playbook_key": "invoice_pdf_luxury_caption",
     "title": "Luxury WA invoice: branded PDF + plain caption",
-    "instructions": "When an operator asks for an invoice/receipt/payment doc on WA:\n1) Generate branded SEPT PDF via generate_invoice_pdf / deal_execution (ReportLab). Identifier sept_invoice_<deal_id>.\n2) Emit ONLY <artifact type=\"file\" identifier=\"sept_invoice_<deal_id>\" /> — never json/md/html table, never ql.app/l/ permalinks.\n3) WA caption = one short plain sentence + the PDF. No markdown headers/bullets/code ticks.\n4) Settlement details come from authenticated operator profile only. NEVER ask for Stripe/QuickBooks/Xero/VAT credentials in chat.\n5) Do not share deal/operator private data into org craft learning — only the procedural pattern."
+    "instructions": "When an operator asks for an invoice/receipt/payment doc on WA:\nrun deal_execution_flow.generate_invoice_pdf and return the application/pdf artifact instead of a link. A permalink is not an invoice.\n1) RUN program sept_multimodal_recognition file deal_execution_flow.py function generate_invoice_pdf so store_artifact writes application/pdf. Identifier sept_invoice_<deal_id>. Do not substitute markdown or a ql.app link.\n2) Emit ONLY <artifact type=\"file\" identifier=\"sept_invoice_<deal_id>\" /> — never json/md/html table, never ql.app/l/ permalinks.\n3) WA caption = one short plain sentence + the PDF. No markdown headers/bullets/code ticks.\n4) Settlement details come from authenticated operator profile only. NEVER ask for Stripe/QuickBooks/Xero/VAT credentials in chat.\n5) Do not share deal/operator private data into org craft learning — only the procedural pattern."
   },
   {
     "category": "item_id",
