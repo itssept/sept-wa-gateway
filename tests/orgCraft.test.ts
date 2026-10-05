@@ -16,6 +16,16 @@ test("default seeds format without PII reject", () => {
   const text = formatCraftSystemInstruction(DEFAULT_CRAFT_PLAYBOOKS);
   expect(text).toContain("ORG SHARED CRAFT");
   expect(text).toContain("invoice_pdf_luxury_caption");
+  expect(text).toContain(
+    "run deal_execution_flow.generate_invoice_pdf and return the application/pdf artifact instead of a link.",
+  );
+  expect(text).toContain("A permalink is not an invoice.");
+  expect(text).toContain("sept_multimodal_recognition");
+  expect(text).toContain("deal_execution_flow.py");
+  expect(text).toContain("function generate_invoice_pdf");
+  expect(text).not.toContain("SEPT LUXURY CONCIERGE");
+  expect(text).toContain("one short plain sentence");
+  expect(text).toContain("No markdown headers/bullets/code ticks.");
   expect(text).toContain("item_id_grounded_search");
   expect(text).toContain("sizing_eu_narrow_notes");
   expect(text).toContain("logistics_truth_gate");
@@ -55,6 +65,9 @@ test("load respects enable flag and inline override", () => {
   expect(blocked).toBeUndefined();
   const defaults = loadOrgCraftSystemInstruction({ enabled: true, useDefaults: true });
   expect(defaults).toContain("invoice_pdf_luxury_caption");
+  expect(defaults).toContain(
+    "run deal_execution_flow.generate_invoice_pdf and return the application/pdf artifact instead of a link.",
+  );
 });
 
 test("load from JSON file stub", () => {
@@ -131,6 +144,9 @@ test("ask receives org craft as systemInstruction and not the message body", asy
   await router.handle(msg);
   expect(calls).toHaveLength(1);
   expect(calls[0]!.input.systemInstruction).toBe(craft);
+  expect(calls[0]!.input.systemInstruction).toContain(
+    "run deal_execution_flow.generate_invoice_pdf and return the application/pdf artifact instead of a link.",
+  );
   expect(calls[0]!.input.systemInstruction).not.toContain("chanel");
   expect(calls[0]!.input.systemInstruction).not.toContain("+973");
   expect(calls[0]!.input.query).toBe("invoice for the chanel please");
