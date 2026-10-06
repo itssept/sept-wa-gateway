@@ -189,7 +189,7 @@ test("text upload_failed does not retry or notify", async () => {
   expect(app.notices).toHaveLength(0);
 });
 
-test("upload_failed then ephemeral bridge ask (no files) succeeds", async () => {
+test("upload_failed retries files and does not post a media-bridge placeholder", async () => {
   const { EphemeralMediaStore } = await import("../src/http/ephemeralMedia.ts");
   const app = makeTestApp();
   const { ctx } = app;
@@ -208,10 +208,7 @@ test("upload_failed then ephemeral bridge ask (no files) succeeds", async () => 
         fileAttempts += 1;
         throw new AskSubmissionError("upload_failed", { threadId: "partial-bot", threadEventId: null }, "staging_error");
       }
-      // Bridge ask: no files, query carries the URL.
-      expect(String(input.query)).toContain("/api/v1/ephemeral-media/");
-      expect(String(input.query)).toContain("Invoice for this");
-      return { threadId: "bridge-bot", threadEventId: "evt-bridge" };
+      throw new Error("text-only media bridge ask must not be sent");
     },
   };
 
@@ -249,9 +246,12 @@ test("upload_failed then ephemeral bridge ask (no files) succeeds", async () => 
   await router.handle(msg);
 
   expect(fileAttempts).toBeGreaterThanOrEqual(2);
-  expect(calls.some((c) => !c.input.files?.length)).toBe(true);
-  expect(notices).toHaveLength(0);
-  expect(ctx.chatBots.pendingPost("test-conn", "97336663062@s.whatsapp.net")).toBeNull();
+  expect(calls.every((c) => (c.input.files?.length ?? 0) > 0)).toBe(true);
+  expect(calls.every((c) => !String(c.input.query).includes("ephemeral-media"))).toBe(true);
+  expect(calls.every((c) => !String(c.input.query).includes("upload_failed"))).toBe(true);
+  expect(notices).toHaveLength(1);
+  expect(notices[0]!.text.toLowerCase()).toContain("resend");
+  expect(ctx.chatBots.pendingPost("test-conn", "97336663062@s.whatsapp.net")?.query).toBe("Invoice for this");
   app.db.close();
 });
 

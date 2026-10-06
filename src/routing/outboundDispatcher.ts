@@ -41,6 +41,7 @@ import {
   claimsInvoiceDelivery,
   ensureInvoiceDelivery,
   invoiceDocumentCaption,
+  INVOICE_PREPARING_TEXT,
   isApplicationPdf,
   isHtmlArtifactSignal,
   isPdfishArtifactRef,
@@ -81,6 +82,11 @@ export class OutboundDispatcher {
     private readonly chatBots: ChatBotRepo,
     private readonly welcomeLog?: WelcomeLogRepo,
   ) {}
+
+  /** One preparing line per chat. A burst of cancelled invoice runs was
+   * sending the same sentence four times (Yara, 2026-10-06 18:43 Rome). */
+  private readonly preparingSentAt = new Map<string, number>();
+  private static readonly PREPARING_DEDUPE_MS = 120_000;
 
   async dispatch(input: DispatchInput): Promise<void> {
     const deadline = Date.now() + this.config.mcp.responseMaxMs;
@@ -275,6 +281,16 @@ export class OutboundDispatcher {
       // Nothing to say and nothing to attach — treat like an empty response.
       this.fail(input, "empty response");
       return;
+    }
+
+    if (artifacts.length === 0 && caption.trim() === INVOICE_PREPARING_TEXT) {
+      const last = this.preparingSentAt.get(input.chatJid) ?? 0;
+      const now = Date.now();
+      if (now - last < OutboundDispatcher.PREPARING_DEDUPE_MS) {
+        this.fail(input, "duplicate_invoice_preparing");
+        return;
+      }
+      this.preparingSentAt.set(input.chatJid, now);
     }
 
     this.workflows.markDone(input.workflowId, caption || `(${artifacts.length} attachment(s))`);

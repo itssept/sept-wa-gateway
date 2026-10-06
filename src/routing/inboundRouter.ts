@@ -7,10 +7,10 @@ import {
   type PromptQlAdapter, type PromptQlFileInput, type PostingIdentity, type AskResult,
 } from "../promptql/promptqlAdapter.ts";
 import {
-  normalizePromptQlFile, recompressPromptQlFile, recompressForBridge, isImagePromptQlFile, promptQlFileMeta,
+  normalizePromptQlFile, recompressForBridge, isImagePromptQlFile, promptQlFileMeta, stagePromptQlFiles,
 } from "../promptql/mediaFiles.ts";
 import {
-  type EphemeralMediaStore, ephemeralMediaUrl, publicBaseUrlUsesNonStandardPort,
+  type EphemeralMediaStore,
 } from "../http/ephemeralMedia.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { ChatBotRepo, ChatBot } from "../storage/chatBotRepo.ts";
@@ -43,6 +43,12 @@ export interface RoutingDeps {
   relayUnregisteredChats?: boolean;
   /** Inbound debouncing window in milliseconds (0 = disabled). */
   inboundDebounceMs?: number;
+  /**
+   * Quiet window for a photo burst (ms). Longer than the text debounce so a
+   * 10–34 image album that trickles in while each photo downloads stays one
+   * ask. 0 uses `inboundDebounceMs` only.
+   */
+  mediaBurstMs?: number;
   /** Issue #25: preformatted shared-craft system_instruction (craft-only, no PII). */
   orgCraftSystemInstruction?: string;
   /** Optional ephemeral media bridge for PromptQL fetch-fallback after upload_failed. */
@@ -67,6 +73,8 @@ const AGENT_ACK_EMOJI = "👀";
  * size, send the files as separate posts instead of building that body.
  */
 const MULTI_FILE_UPLOAD_BUDGET_BYTES = 5 * 1024 * 1024;
+/** Staged JPEG budget for one ask. 34 photos at ~120KB stay under the 5MB body cap. */
+const STAGED_UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024;
 /**
  * After the debounce quiet window, a real follow-up is sent at once (0).
  * PromptQL then stops the older run. A photo dump must not get here one
@@ -149,25 +157,45 @@ export class InboundRouter {
   }
 
   private senderBufferKey(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "senderPhoneE164" | "senderJid">): string {
-    return this.bufferKey(msg.connectionId, msg.chatJid, msg.senderPhoneE164 ?? msg.senderJid);
+    // A DM album can flicker between phone and LID on successive items.
+    // One buffer per chat keeps those photos on the same ask. Groups stay
+    // per sender so two shoppers are not merged.
+    const party = msg.chatJid.endsWith("@g.us")
+      ? (msg.senderPhoneE164 ?? msg.senderJid)
+      : msg.chatJid;
+    return this.bufferKey(msg.connectionId, msg.chatJid, party);
+  }
+
+  /**
+   * Text uses the short debounce. A buffer that already holds an image, or
+   * an image that is arriving now, uses the longer media window so a 34-photo
+   * album is not flushed photo-by-photo.
+   */
+  private burstQuietMs(buf: InboundBuffer | null, msg: Pick<InboundMessage, "msgType">): number {
+    const textMs = this.deps.inboundDebounceMs ?? 0;
+    const mediaMs = this.deps.mediaBurstMs ?? 0;
+    const hasImage = msg.msgType === "image" || (buf?.items.some((item) => item.msg.msgType === "image") ?? false);
+    if (hasImage) return Math.max(textMs, mediaMs);
+    return textMs;
   }
 
   /**
    * If this sender already has a debounce buffer, restart its quiet window.
    * The socket calls this while the next photo is still downloading: a CDN
-   * fetch slower than `WHATSAPP_INBOUND_DEBOUNCE_MS` must not flush the
-   * previous image as its own triggering ask. Returns true when a buffer
-   * was held open.
+   * fetch slower than the quiet window must not flush the previous image as
+   * its own triggering ask. Returns true when a buffer was held open.
    */
   touchBurst(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "senderPhoneE164" | "senderJid" | "fromMe" | "messageId">): boolean {
-    const debounceMs = this.deps.inboundDebounceMs ?? 0;
-    if (debounceMs <= 0) return false;
     if (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId)) return false;
     const bufKey = this.senderBufferKey(msg);
     const buf = this.clientBuffers.get(bufKey);
     if (!buf) return false;
+    // The bytes are not in the buffer yet. Treat the tick as an image so a
+    // caption-only buffer stays open until this photo is appended.
+    const quietMs = this.burstQuietMs(buf, { msgType: "image" });
+    if (quietMs <= 0) return false;
     if (buf.timer) clearTimeout(buf.timer);
-    buf.timer = setTimeout(() => this.flushBuffer(bufKey), debounceMs);
+    buf.timer = setTimeout(() => this.flushBuffer(bufKey), quietMs);
     return true;
   }
 
@@ -192,14 +220,18 @@ export class InboundRouter {
   handle(msg: InboundMessage): Promise<void> {
     const chatKey = this.key(msg.connectionId, msg.chatJid);
     const epoch = this.epochs.get(chatKey) ?? 0;
-    const debounceMs = this.deps.inboundDebounceMs ?? 0;
 
-    // Direct bypass if debouncing is disabled (0ms) or message is from gateway itself
-    if (debounceMs <= 0 || (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId))) {
+    // Gateway echoes are not a burst. A photo uses the media window even when
+    // the text debounce is 0, so an album is not one ask per image.
+    if (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId)) {
       return this.enqueue(chatKey, () => this.processBatch([msg], epoch));
     }
 
     const bufKey = this.senderBufferKey(msg);
+    const quietMs = this.burstQuietMs(this.clientBuffers.get(bufKey) ?? null, msg);
+    if (quietMs <= 0) {
+      return this.enqueue(chatKey, () => this.processBatch([msg], epoch));
+    }
 
     let buf = this.clientBuffers.get(bufKey);
     if (!buf) {
@@ -220,18 +252,20 @@ export class InboundRouter {
 
       buf.timer = setTimeout(() => {
         this.flushBuffer(bufKey);
-      }, debounceMs);
+      }, quietMs);
 
       this.clientBuffers.set(bufKey, buf);
       return buf.promise;
     }
 
-    // Append to existing buffer and reset debounce timer
+    // Append to existing buffer and reset the quiet window. An image
+    // lengthens a caption that arrived first so they leave as one ask.
     buf.items.push({ msg, epoch });
+    const nextQuiet = this.burstQuietMs(buf, msg);
     if (buf.timer) clearTimeout(buf.timer);
     buf.timer = setTimeout(() => {
       this.flushBuffer(bufKey);
-    }, debounceMs);
+    }, nextQuiet);
 
     return buf.promise;
   }
@@ -587,11 +621,16 @@ export class InboundRouter {
           log.info("bare re-tag while a run is in flight; relayed as context only");
         } else {
           // A real follow-up after the quiet window. Default is to send it
-          // now, which cancels the in-flight run. GATEWAY_IN_FLIGHT_WAIT_MS
-          // waits for that run instead.
-          const capMs = this.deps.inFlightWaitMs ?? DEFAULT_IN_FLIGHT_WAIT_MS;
+          // now, which cancels the in-flight run. A photo burst waits out
+          // the media window instead: that cancel is the "SEPT was stopped."
+          // line. GATEWAY_IN_FLIGHT_WAIT_MS does the same for other follow-ups.
+          const imageBurst = validMessages.some((m) => m.msgType === "image");
+          const capMs = Math.max(
+            this.deps.inFlightWaitMs ?? DEFAULT_IN_FLIGHT_WAIT_MS,
+            imageBurst ? (this.deps.mediaBurstMs ?? 0) : 0,
+          );
           if (capMs > 0) {
-            log.info("follow-up while a run is in flight; waiting for it to finish", { capMs });
+            log.info("follow-up while a run is in flight; waiting for it to finish", { capMs, imageBurst });
             let timer: ReturnType<typeof setTimeout> | undefined;
             await Promise.race([
               running.catch(() => undefined),
@@ -771,14 +810,16 @@ export class InboundRouter {
     });
   }
   /**
-   * Submit an ask that may carry media. Live PromptQL MCP staging can return
-   * upload_failed even when Baileys download + gateway DNS succeed (observed
-   * 2026-09-28 Dior + 2026-09-29 Chanel). Ladder:
-   *   1) normalized files
-   *   2) backoff + same files
-   *   3) recompressed JPEG (images) + backoff
-   *   4) ephemeral media bridge URL (no files[]) so PromptQL can fetch the bytes
-   * A successful attempt clears pending_post so text recovery does not replay.
+   * Submit an ask that may carry media. Live PromptQL MCP staging returns
+   * upload_failed for WhatsApp JPEGs (2026-09-28 Dior, 2026-09-29 Chanel,
+   * 2026-10-06 Yara's 34-photo album). The old fallback posted a text ask
+   * whose body was the media-bridge boilerplate and `(image)`, with no
+   * bytes, and force_respond cancelled the previous run. Ladder:
+   *   1) staged baseline JPEGs, sized to fit the whole burst in one body
+   *   2) backoff + the same files
+   *   3) a smaller re-encode, still in files[]
+   * There is no text-only bridge ask. A failed ladder throws so the operator
+   * notice fires and the thread is not filled with placeholders.
    */
   private async submitMediaAsk(
     firstMsg: InboundMessage,
@@ -790,48 +831,48 @@ export class InboundRouter {
     log: Logger,
   ): Promise<AskResult> {
     const hadReadyMedia = files.length > 0;
+    const staged = stagePromptQlFiles(files, STAGED_UPLOAD_BUDGET_BYTES);
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
     const tryFiles = async (payload: PromptQlFileInput[], label: string): Promise<AskResult> => {
       for (const f of payload) {
         log.info("ask media payload", { phase: label, ...promptQlFileMeta(f) });
       }
-      // submitTurn keeps the #30 multi-file one-by-one split. Single-file
-      // upload_failed is rethrown so this ladder owns backoff / recompress / bridge.
+      // submitTurn keeps the multi-file one-by-one split when the body is
+      // still over budget. Single-file upload_failed is rethrown so this
+      // ladder owns the backoff and the smaller re-encode.
       return this.submitTurn(
         firstMsg, dest, identity, rawQuery, agentResponse, payload, true, firstMsg.messageId, log,
       );
     };
 
     try {
-      return await tryFiles(files, "normalized");
+      return await tryFiles(staged, "staged");
     } catch (err) {
       if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || !hadReadyMedia) {
         throw err;
       }
       log.warn("ask upload_failed; retrying after backoff", {
-        status: err.status, detailCode: err.detailCode, fileCount: files.length, attempt: 2,
+        status: err.status, detailCode: err.detailCode, fileCount: staged.length, attempt: 2,
       });
       await sleep(800);
       try {
-        const ask = await tryFiles(files, "retry");
+        const ask = await tryFiles(staged, "retry");
         this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
         return ask;
       } catch (err2) {
         if (!(err2 instanceof AskSubmissionError) || err2.status !== "upload_failed") throw err2;
         let last: AskSubmissionError = err2;
 
-        const recompressed = files.map((f) =>
-          isImagePromptQlFile(f) ? recompressPromptQlFile(f) : f,
-        );
-        const changed = recompressed.some((f, i) => f.content_base64 !== files[i]!.content_base64);
+        const smaller = staged.map((f) => (isImagePromptQlFile(f) ? recompressForBridge(f) : f));
+        const changed = smaller.some((f, i) => f.content_base64 !== staged[i]!.content_base64);
         if (changed) {
-          log.warn("ask upload_failed; retrying with recompressed image", {
+          log.warn("ask upload_failed; retrying with a smaller image", {
             status: last.status, detailCode: last.detailCode, attempt: 3,
           });
           await sleep(500);
           try {
-            const ask = await tryFiles(recompressed, "recompress");
+            const ask = await tryFiles(smaller, "smaller");
             this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
             return ask;
           } catch (err3) {
@@ -840,87 +881,11 @@ export class InboundRouter {
           }
         }
 
-        const bridged = await this.tryEphemeralBridgeAsk(
-          firstMsg, dest, identity, rawQuery, agentResponse, files, log,
-        );
-        if (bridged) {
-          this.chatBots.setPendingPost(firstMsg.connectionId, firstMsg.chatJid, null);
-          return bridged;
-        }
+        log.warn("ask upload_failed; not posting a media-bridge placeholder", {
+          status: last.status, detailCode: last.detailCode, fileCount: staged.length,
+        });
         throw last;
       }
-    }
-  }
-
-  /** Host media on the public gateway URL and ask PromptQL to fetch it (no files[]). */
-  private async tryEphemeralBridgeAsk(
-    firstMsg: InboundMessage,
-    dest: Destination,
-    identity: PostingIdentity,
-    rawQuery: string,
-    agentResponse: "force_skip" | "force_respond",
-    files: PromptQlFileInput[],
-    log: Logger,
-  ): Promise<AskResult | null> {
-    const store = this.deps.ephemeralMedia;
-    const base = (this.deps.publicBaseUrl ?? "").trim();
-    if (!store || !base || files.length === 0) {
-      log.warn("ephemeral media bridge unavailable", {
-        hasStore: Boolean(store), hasPublicBaseUrl: Boolean(base),
-      });
-      return null;
-    }
-    if (publicBaseUrlUsesNonStandardPort(base)) {
-      // Live 2026-09-30: PromptQL Cloud could not fetch :8790 ("photo link could
-      // not be loaded"). Prefer Caddy/TLS on :80/:443 for GATEWAY_PUBLIC_BASE_URL.
-      log.warn("ephemeral media bridge public base uses non-standard port", {
-        hint: "set GATEWAY_PUBLIC_BASE_URL to http(s)://host without :8790 (Caddy :80/:443)",
-      });
-    }
-    const urls: string[] = [];
-    for (const f of files) {
-      const bridgedFile = isImagePromptQlFile(f) ? recompressForBridge(f) : f;
-      const token = store.put({
-        bytes: Buffer.from(bridgedFile.content_base64, "base64"),
-        mimeType: bridgedFile.mime_type,
-        fileName: bridgedFile.file_name,
-        // Multi-fetch: PromptQL may HEAD then GET, or retry the URL.
-        maxFetches: 8,
-      });
-      urls.push(ephemeralMediaUrl(base, token));
-    }
-    const urlBlock = urls.map((u, i) => `Photo ${i + 1} URL: ${u}`).join("\n");
-    const bridgedQuery =
-      `[Attached photo via gateway media bridge — MCP files[] upload_failed]\n` +
-      `${urlBlock}\n` +
-      `Fetch each URL (HTTP GET) and treat the image as the operator's WhatsApp photo attachment ` +
-      `for item identification / invoice generation. The URL is token-gated and short-lived.\n` +
-      `Operator message:\n${rawQuery}`;
-    const bridgeInstruction =
-      "When a message includes a gateway media bridge photo URL, fetch that URL with HTTP GET and " +
-      "treat the image as the operator's WhatsApp photo attachment. Do not ask the " +
-      "operator to resend the photo unless the URL fetch fails. Never repeat the " +
-      "media bridge URL in your reply.";
-    log.warn("ask upload_failed; falling back to ephemeral media bridge", {
-      fileCount: files.length, urlCount: urls.length,
-      nonStandardPort: publicBaseUrlUsesNonStandardPort(base),
-    });
-    try {
-      // Bridge instruction rides in the query so it reaches the agent even when
-      // org craft is unset. submit still merges orgCraftSystemInstruction.
-      // rememberFailure stays false: the file attempts already stored the
-      // operator text. A failed bridge must not replace that with a bearer URL.
-      return await this.submit(
-        firstMsg, dest, identity,
-        `${bridgeInstruction}\n\n${bridgedQuery}`,
-        agentResponse, [], false, firstMsg.messageId,
-      );
-    } catch (err) {
-      log.warn("ephemeral media bridge ask failed", {
-        errName: err instanceof Error ? err.name : "unknown",
-        status: err instanceof AskSubmissionError ? err.status : null,
-      });
-      return null;
     }
   }
 

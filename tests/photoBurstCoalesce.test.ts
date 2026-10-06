@@ -29,8 +29,11 @@ afterEach(() => {
   }
 });
 
-function setup(opts: { debounceMs: number; downloadDelayMs?: number }): BurstApp {
-  const app = makeTestApp(testConfig({ inboundDebounceMs: opts.debounceMs }));
+function setup(opts: { debounceMs: number; mediaBurstMs?: number; downloadDelayMs?: number }): BurstApp {
+  const app = makeTestApp(testConfig({
+    inboundDebounceMs: opts.debounceMs,
+    mediaBurstMs: opts.mediaBurstMs ?? 0,
+  }));
   const { ctx } = app;
   ctx.gatewaySettings.set("client-token", "common-room");
   const shopper = ctx.shoppers.register("Alice", "+14155551111", "alice-room").shopper;
@@ -72,6 +75,7 @@ function setup(opts: { debounceMs: number; downloadDelayMs?: number }): BurstApp
       prepareHistory: async () => null,
       relayUnregisteredChats: true,
       inboundDebounceMs: opts.debounceMs,
+      mediaBurstMs: opts.mediaBurstMs ?? 0,
     },
   );
   const push = (message: WAMessage) => {
@@ -197,4 +201,22 @@ test("a download slower than the quiet window still keeps the whole photo burst 
   expect(app.calls[0]!.input.files).toHaveLength(5);
   expect(app.calls[0]!.input.query).toContain("invoice this");
   expect(app.calls[0]!.input.agentResponse).toBe("force_respond");
+});
+
+test("photos that arrive after the text debounce, but inside the album window, are one ask", async () => {
+  const app = setup({ debounceMs: 40, mediaBurstMs: 280 });
+  for (let n = 1; n <= 12; n++) {
+    app.push(image(`gap-${n}`, n === 12 ? "Please take orders" : ""));
+    await new Promise((r) => setTimeout(r, 90));
+  }
+  await app.settled();
+  await waitFor(() => app.calls.length >= 1, "gapped album");
+  await new Promise((r) => setTimeout(r, 120));
+  expect(app.calls).toHaveLength(1);
+  expect(app.dispatches).toHaveLength(1);
+  expect(app.calls[0]!.input.agentResponse).toBe("force_respond");
+  expect(app.calls[0]!.input.files).toHaveLength(12);
+  expect(app.calls[0]!.input.query).toContain("Please take orders");
+  expect(app.calls[0]!.input.query).not.toContain("upload_failed");
+  expect(app.calls[0]!.input.query).not.toContain("SEPT was stopped");
 });
