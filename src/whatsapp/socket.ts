@@ -107,6 +107,12 @@ export interface SocketHooks {
   onSelfAdded?: (event: SelfMembershipEvent) => void;
   /** Called for each captured inbound message (already persisted). */
   onInbound?: (msg: InboundMessage) => void | Promise<void>;
+  /**
+   * Called while the next attachment is still downloading, and again until
+   * that download finishes, so an open debounce buffer does not flush the
+   * previous photo alone. Return true when a buffer was held open.
+   */
+  onBurstTick?: (msg: InboundMessage) => boolean | void;
   /** Called when the connection transitions to logged_out (human must re-link). */
   onLoggedOut?: (connectionId: string) => void;
   /** Called with a fresh pairing code to show the operator. */
@@ -144,6 +150,12 @@ export class WhatsAppConnection {
   private readonly pendingHistoryGroups = new Set<string>();
   private readonly joinWaits = new Map<string, JoinWait>();
   private inboundQueue: Promise<void> = Promise.resolve();
+  /**
+   * Per-chat debounce handoff. The promise resolves when the router finishes
+   * the burst (MCP accept), not when the quiet window opens. `acceptMs` is
+   * the last message accepted into that burst.
+   */
+  private readonly burstHandoffs = new Map<string, { acceptMs: number; pending: Promise<void> }>();
 
   constructor(
     private readonly db: Database,
@@ -371,14 +383,13 @@ export class WhatsAppConnection {
 
     sock.ev.on("connection.update", (u) => this.onConnectionUpdate(u));
     sock.ev.on("messages.upsert", (up) => {
-      // Queue the whole download → PromptQL handoff. This bounds transient
-      // attachment memory even when Baileys emits several upsert events.
-      const epochs = new Map(this.groupEpochs);
-      this.inboundQueue = this.inboundQueue
-        .then(() => this.onMessagesUpsert(up, sock, epochs))
-        .catch((err) => {
-          this.log.error("inbound batch handling failed", { err });
-        });
+      // Queue download → router accept. A photo still inside the debounce
+      // window must be able to join the open buffer; waiting out the window
+      // here made every image its own triggering ask.
+      this.enqueueInbound(
+        () => this.onMessagesUpsert(up, sock, new Map(this.groupEpochs)),
+        "inbound batch handling failed",
+      );
     });
 
     sock.ev.on("messaging-history.set", (history) => this.queueHistoryBatch(history, sock));
@@ -453,12 +464,12 @@ export class WhatsAppConnection {
       if (this.config.captureGroupHistory && this.config.historyJoinWaitMs > 0 && this.live.sock) {
         const epoch = this.groupEpochs.get(groupJid)!;
         const timer = setTimeout(() => {
-          this.inboundQueue = this.inboundQueue.then(async () => {
+          this.enqueueInbound(async () => {
             if (this.joinWaits.get(groupJid)?.epoch !== epoch) return;
             // Replay all partial chunks, sorted together, before releasing live input.
             await this.notifyHistory(groupJid, 0);
             if (this.joinWaits.get(groupJid)?.epoch === epoch) await this.releaseJoinWait(groupJid);
-          }).catch(() => this.log.warn("history join wait release failed", { groupJid: maskJid(groupJid) }));
+          }, "history join wait release failed");
         }, this.config.historyJoinWaitMs);
         this.joinWaits.set(groupJid, { timer, messages: [], sock: this.live.sock, epoch });
       }
@@ -499,9 +510,62 @@ export class WhatsAppConnection {
   private queueHistoryBatch(payload: unknown, sock: WASocket): void {
     if (!this.config.captureGroupHistory) return;
     const epochs = new Map(this.groupEpochs);
-    this.inboundQueue = this.inboundQueue
-      .then(() => this.onHistoryBatch(payload, sock, epochs))
-      .catch((err) => this.log.error("history batch handling failed", { err }));
+    this.enqueueInbound(
+      () => this.onHistoryBatch(payload, sock, epochs),
+      "history batch handling failed",
+    );
+  }
+
+  /**
+   * Serialize inbound work on one chain. Live upserts return as soon as the
+   * message is accepted into the debounce buffer; they do not wait out
+   * `WHATSAPP_INBOUND_DEBOUNCE_MS` on this chain. The per-message wait in
+   * `onMessagesUpsert` only blocks once that chat's quiet window has closed,
+   * so a later photo still joins the open burst instead of starting a second
+   * triggering ask.
+   */
+  private enqueueInbound(work: () => Promise<void>, errorLog: string): void {
+    this.inboundQueue = this.inboundQueue.then(work).catch((err) => {
+      this.log.error(errorLog, { err });
+    });
+  }
+
+  private burstKey(chatJid: string): string {
+    return JSON.stringify([this.config.connectionId, chatJid]);
+  }
+
+  /**
+   * Block the next download once this chat's burst has left the quiet window.
+   * Returns true when it waited (the previous burst is already submitted).
+   */
+  private async waitIfChatBurstClosed(chatJid: string): Promise<boolean> {
+    const debounceMs = this.config.inboundDebounceMs ?? 0;
+    const burst = this.burstHandoffs.get(this.burstKey(chatJid));
+    if (!burst || debounceMs <= 0) return false;
+    if (Date.now() - burst.acceptMs < debounceMs) return false;
+    await burst.pending;
+    return true;
+  }
+
+  /**
+   * Keep an open router buffer from flushing while this message's bytes are
+   * still downloading. A CDN fetch slower than `WHATSAPP_INBOUND_DEBOUNCE_MS`
+   * would otherwise submit the previous photo alone and cancel it when this
+   * one arrives. Stops as soon as the caller finishes the download.
+   */
+  private holdOpenBurst(msg: InboundMessage): () => void {
+    const debounceMs = this.config.inboundDebounceMs ?? 0;
+    if (debounceMs <= 0 || !this.hooks.onBurstTick) return () => undefined;
+    const tick = () => {
+      if (this.hooks.onBurstTick?.(msg) !== true) return;
+      const burst = this.burstHandoffs.get(this.burstKey(msg.chatJid));
+      if (burst) burst.acceptMs = Date.now();
+    };
+    tick();
+    const period = Math.max(25, Math.floor(debounceMs / 2));
+    const timer = setInterval(tick, period);
+    timer.unref?.();
+    return () => clearInterval(timer);
   }
 
   private async onHistoryBatch(
@@ -710,19 +774,48 @@ export class WhatsAppConnection {
         if (stale()) continue;
 
         const normalized = { ...message, message: normalizeMessageContent(message.message) };
-        const { status, media } = await this.media.download(normalized, sock);
+        // Once this chat's burst has left the quiet window, finish that submit
+        // before downloading another attachment. While the window is still
+        // open, do not wait — the next photo has to enter the same buffer.
+        const burstClosed = await this.waitIfChatBurstClosed(parsed.chatJid);
+        const releaseHold = burstClosed ? () => undefined : this.holdOpenBurst(parsed);
+        let status: MediaStatus;
+        let media: DownloadedMedia | null;
+        try {
+          const downloaded = await this.media.download(normalized, sock);
+          status = downloaded.status;
+          media = downloaded.media;
+        } finally {
+          releaseHold();
+        }
         parsed.mediaStatus = status;
         parsed.media = media;
         if (stale()) { parsed.media = null; continue; }
-        try {
-          // Await the handoff so this upsert batch does not retain several
-          // attachment buffers while PromptQL accepts/retries earlier ones.
-          await this.hooks.onInbound?.(parsed);
-        } finally {
-          // The downloader owns this transient buffer and always releases it,
-          // even if routing or MCP submission fails.
-          parsed.media = null;
+        const debounceMs = this.config.inboundDebounceMs ?? 0;
+        if (debounceMs <= 0) {
+          try {
+            // No burst window: finish this handoff before the next message so
+            // only one attachment is held during PromptQL accept/retry.
+            await this.hooks.onInbound?.(parsed);
+          } finally {
+            parsed.media = null;
+          }
+          continue;
         }
+        // Own the bytes until the router finishes the burst. Returning without
+        // awaiting lets the next upsert join this buffer. Awaiting here was
+        // the photo-dump bug: each image waited out the quiet window, flushed
+        // alone as force_respond, and PromptQL cancelled the previous run
+        // (interrupted_due_to_new_trigger / "SEPT was stopped").
+        const pending = Promise.resolve()
+          .then(() => this.hooks.onInbound?.(parsed))
+          .finally(() => {
+            parsed.media = null;
+          })
+          .catch((err) => {
+            this.log.error("inbound message handling failed", { err });
+          });
+        this.burstHandoffs.set(this.burstKey(parsed.chatJid), { acceptMs: Date.now(), pending });
       } catch (err) {
         this.log.error("inbound message handling failed", { err });
       }

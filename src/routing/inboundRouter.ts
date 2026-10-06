@@ -68,11 +68,11 @@ const AGENT_ACK_EMOJI = "👀";
  */
 const MULTI_FILE_UPLOAD_BUDGET_BYTES = 5 * 1024 * 1024;
 /**
- * Default: a real follow-up (new text or photo) is sent at once. PromptQL then
- * stops the older run and the newest run answers with the whole thread in
- * context, which is how a photo + caption + "invoice this" burst coalesces
- * into one reply (live Hello thread 2026-10-06 16:43 Rome). Set
- * GATEWAY_IN_FLIGHT_WAIT_MS > 0 to wait for the running answer instead.
+ * After the debounce quiet window, a real follow-up is sent at once (0).
+ * PromptQL then stops the older run. A photo dump must not get here one
+ * image at a time: `WHATSAPP_INBOUND_DEBOUNCE_MS` collects the burst into
+ * one ask first. Set GATEWAY_IN_FLIGHT_WAIT_MS > 0 to wait for the running
+ * answer instead of cancelling it.
  */
 const DEFAULT_IN_FLIGHT_WAIT_MS = 0;
 
@@ -148,6 +148,29 @@ export class InboundRouter {
     return JSON.stringify([connectionId, chatJid, senderKey]);
   }
 
+  private senderBufferKey(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "senderPhoneE164" | "senderJid">): string {
+    return this.bufferKey(msg.connectionId, msg.chatJid, msg.senderPhoneE164 ?? msg.senderJid);
+  }
+
+  /**
+   * If this sender already has a debounce buffer, restart its quiet window.
+   * The socket calls this while the next photo is still downloading: a CDN
+   * fetch slower than `WHATSAPP_INBOUND_DEBOUNCE_MS` must not flush the
+   * previous image as its own triggering ask. Returns true when a buffer
+   * was held open.
+   */
+  touchBurst(msg: Pick<InboundMessage, "connectionId" | "chatJid" | "senderPhoneE164" | "senderJid" | "fromMe" | "messageId">): boolean {
+    const debounceMs = this.deps.inboundDebounceMs ?? 0;
+    if (debounceMs <= 0) return false;
+    if (msg.fromMe && this.outboundLog.isGatewayMessage(msg.connectionId, msg.chatJid, msg.messageId)) return false;
+    const bufKey = this.senderBufferKey(msg);
+    const buf = this.clientBuffers.get(bufKey);
+    if (!buf) return false;
+    if (buf.timer) clearTimeout(buf.timer);
+    buf.timer = setTimeout(() => this.flushBuffer(bufKey), debounceMs);
+    return true;
+  }
+
   onSelfMembership(event: SelfMembershipEvent, action: "add" | "remove" = "remove"): void {
     const value = MembershipSchema.parse(event);
     const key = this.key(value.connectionId, value.groupJid);
@@ -176,8 +199,7 @@ export class InboundRouter {
       return this.enqueue(chatKey, () => this.processBatch([msg], epoch));
     }
 
-    const senderKey = msg.senderPhoneE164 ?? msg.senderJid;
-    const bufKey = this.bufferKey(msg.connectionId, msg.chatJid, senderKey);
+    const bufKey = this.senderBufferKey(msg);
 
     let buf = this.clientBuffers.get(bufKey);
     if (!buf) {
@@ -547,6 +569,11 @@ export class InboundRouter {
       shopperMediaAsk = identity.role === "shopper" && hadReadyMedia && !firstMsg.fromMe;
       let agentResponse: "force_respond" | "force_skip" =
         (shopperTrigger && !isGreetingFirstDM) ? "force_respond" : "force_skip";
+      if (validMessages.length > 1) {
+        log.info("coalesced inbound burst", {
+          messages: validMessages.length, files: files.length, agentResponse,
+        });
+      }
       const chatKey = this.key(firstMsg.connectionId, firstMsg.chatJid);
       let retagOnly = false;
       const running = this.inFlight.get(chatKey);
@@ -559,7 +586,9 @@ export class InboundRouter {
           agentResponse = "force_skip";
           log.info("bare re-tag while a run is in flight; relayed as context only");
         } else {
-          // A real follow-up waits for the running answer instead of killing it.
+          // A real follow-up after the quiet window. Default is to send it
+          // now, which cancels the in-flight run. GATEWAY_IN_FLIGHT_WAIT_MS
+          // waits for that run instead.
           const capMs = this.deps.inFlightWaitMs ?? DEFAULT_IN_FLIGHT_WAIT_MS;
           if (capMs > 0) {
             log.info("follow-up while a run is in flight; waiting for it to finish", { capMs });
