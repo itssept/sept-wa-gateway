@@ -45,6 +45,8 @@ async function main(): Promise<void> {
     ctx.messages,
     {
       onInbound: (msg) => router?.handle(msg),
+      // Hold the debounce buffer open while the next photo is still downloading.
+      onBurstTick: (msg) => router?.touchBurst(msg) ?? false,
       onSelfRemoved: (event) => router?.onSelfMembership(event, "remove"),
       onSelfAdded: (event) => router?.onSelfMembership(event, "add"),
       onHistoryBatch: (event) => router?.onHistoryBatch(event),

@@ -69,7 +69,7 @@ test("bare re-tag during an in-flight run is relayed force_skip and does not sta
   app.release();
 });
 
-test("default: a real follow-up is sent at once so the newest run answers the whole burst", async () => {
+test("debounce disabled: a real follow-up is its own trigger and can interrupt the in-flight run", async () => {
   const app = setup();
   await app.router.handle(dm("(image)", { msgType: "text" }));
   await app.router.handle(dm("Invoice this"));
