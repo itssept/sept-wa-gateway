@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import jpeg from "jpeg-js";
 import {
   normalizePromptQlFile, recompressPromptQlFile, recompressForBridge, baseMime, promptQlFileMeta,
+  stagePromptQlFiles,
 } from "../src/promptql/mediaFiles.ts";
 
 function tinyJpeg(width = 8, height = 8, quality = 90): Buffer {
@@ -82,4 +83,27 @@ test("recompressForBridge leaves a small JPEG unchanged and shrinks a large one"
   expect(meta.mime).toBe("image/jpeg");
   expect(meta.bytes).toBeLessThanOrEqual(220 * 1024);
   expect(meta.bytes).toBeLessThan(bytes.length);
+});
+
+test("stagePromptQlFiles fits 34 images into one upload budget", () => {
+  const width = 640;
+  const height = 640;
+  const data = new Uint8Array(width * height * 4);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 13) & 255;
+  const bytes = Buffer.from(jpeg.encode({ data, width, height }, 90).data);
+  const one = {
+    file_name: "look.jpg",
+    mime_type: "image/jpeg",
+    content_base64: bytes.toString("base64"),
+  };
+  const staged = stagePromptQlFiles(Array.from({ length: 34 }, () => one), 4 * 1024 * 1024);
+  expect(staged).toHaveLength(34);
+  let total = 0;
+  for (const file of staged) {
+    const raw = Buffer.from(file.content_base64, "base64");
+    expect(raw.subarray(0, 3).toString("hex")).toBe("ffd8ff");
+    expect(file.mime_type).toBe("image/jpeg");
+    total += raw.length;
+  }
+  expect(total).toBeLessThanOrEqual(4 * 1024 * 1024);
 });

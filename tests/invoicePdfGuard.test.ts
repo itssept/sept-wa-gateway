@@ -69,6 +69,7 @@ function dispatchHarness(
   },
 ) {
   const sent: { text?: string; doc?: { fileName: string; mimeType: string; caption?: string; bytes: Buffer } } = {};
+  const texts: string[] = [];
   const adapter = {
     waitForResponse: async () => ({
       status: "completed" as const,
@@ -89,6 +90,7 @@ function dispatchHarness(
       sendText: async (_jid: string, text: string, opts: { onMessageId: (id: string) => void }) => {
         opts.onMessageId("text-1");
         sent.text = text;
+        texts.push(text);
         return "text-1";
       },
       sendDocument: async (_jid: string, doc: { fileName: string; mimeType: string; caption?: string; bytes: Buffer }, opts: { onMessageId: (id: string) => void }) => {
@@ -101,7 +103,7 @@ function dispatchHarness(
     ctx.log,
     ctx.chatBots,
   );
-  return { dispatcher, sent };
+  return { dispatcher, sent, texts };
 }
 
 async function claimAndDispatch(
@@ -319,5 +321,15 @@ test("non-invoice messages are unchanged", async () => {
   await claimAndDispatch(ctx, second.dispatcher, "status-2");
   expect(second.sent.text).toBe(question);
   expect(second.sent.doc).toBeUndefined();
+  db.close();
+});
+
+test("four invoice runs in one chat send the preparing line once", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, texts } = dispatchHarness(ctx, LIVE_REPLY);
+  for (let i = 0; i < 4; i++) {
+    await claimAndDispatch(ctx, dispatcher, `prep-${i}`);
+  }
+  expect(texts).toEqual([INVOICE_PREPARING_TEXT]);
   db.close();
 });

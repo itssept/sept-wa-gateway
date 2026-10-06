@@ -91,14 +91,19 @@ are covered by mocked boundary tests, not a live shopper-token test.
   turn-scoped `generate_invoice_pdf` / `application/pdf` contract onto
   `system_instruction`. Shopper text itself is not wrapped.
 - Bare re-tags while a run is in flight (`@SEPT`, `?`, `pls`, no new text and
-  no photo) are `force_skip` context, not a new `force_respond`. A photo burst
-  in one chat (images seconds apart, with or without a trailing caption) is
-  one ask: `WHATSAPP_INBOUND_DEBOUNCE_MS` (default 5000, resets on each
-  message, max 60000) is the quiet window, and the socket must accept the
-  next photo into that buffer without waiting the window out. Waiting made
-  each image its own `force_respond` and PromptQL cancelled the run. A real
-  follow-up after the quiet window still triggers at once unless
-  `GATEWAY_IN_FLIGHT_WAIT_MS` is set.
+  no photo) are `force_skip` context, not a new `force_respond`. A photo
+  album (10–34 images, with or without a trailing caption such as "Please
+  take orders") is one ask. `WHATSAPP_MEDIA_BURST_MS` (default 45000, resets
+  on each image, max 180000) is that quiet window — the 5s text debounce is
+  too short while a phone uploads the album, and each flushed photo was its
+  own `force_respond` (`SEPT was stopped.`). The socket must accept the next
+  photo into the open buffer without waiting out an in-flight ask. Image
+  bytes are staged into `files[]` (one body when they fit). Do not replace a
+  failed upload with a text-only media-bridge ask; that is the `(image)` /
+  `upload_failed` placeholder. A real follow-up after the album window still
+  triggers at once unless `GATEWAY_IN_FLIGHT_WAIT_MS` is set. `SEPT was
+  stopped.` is not a WhatsApp message. Identical `Preparing the invoice…`
+  lines for one chat collapse to a single send.
 - Product concept: **bot**. Keep legacy `thread_id` on the wire and in storage.
 - **`src/promptql/promptqlAdapter.ts` is the only place that shapes MCP args.**
   `agent_response`, `system_instruction`, and `project_name` belong there.

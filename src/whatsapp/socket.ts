@@ -538,11 +538,19 @@ export class WhatsAppConnection {
    * Block the next download once this chat's burst has left the quiet window.
    * Returns true when it waited (the previous burst is already submitted).
    */
+  /** Text debounce and the longer photo-album window. The album window wins. */
+  private burstQuietMs(): number {
+    return Math.max(this.config.inboundDebounceMs ?? 0, this.config.mediaBurstMs ?? 0);
+  }
+
   private async waitIfChatBurstClosed(chatJid: string): Promise<boolean> {
-    const debounceMs = this.config.inboundDebounceMs ?? 0;
+    const quietMs = this.burstQuietMs();
     const burst = this.burstHandoffs.get(this.burstKey(chatJid));
-    if (!burst || debounceMs <= 0) return false;
-    if (Date.now() - burst.acceptMs < debounceMs) return false;
+    if (!burst || quietMs <= 0) return false;
+    // A 34-photo album arrives as many upserts. Blocking here once the short
+    // text debounce elapsed made each later photo wait out the previous
+    // ask and then cancel it.
+    if (Date.now() - burst.acceptMs < quietMs) return false;
     await burst.pending;
     return true;
   }
@@ -554,15 +562,16 @@ export class WhatsAppConnection {
    * one arrives. Stops as soon as the caller finishes the download.
    */
   private holdOpenBurst(msg: InboundMessage): () => void {
-    const debounceMs = this.config.inboundDebounceMs ?? 0;
-    if (debounceMs <= 0 || !this.hooks.onBurstTick) return () => undefined;
+    const quietMs = this.burstQuietMs();
+    if (quietMs <= 0 || !this.hooks.onBurstTick) return () => undefined;
     const tick = () => {
       if (this.hooks.onBurstTick?.(msg) !== true) return;
       const burst = this.burstHandoffs.get(this.burstKey(msg.chatJid));
       if (burst) burst.acceptMs = Date.now();
     };
     tick();
-    const period = Math.max(25, Math.floor(debounceMs / 2));
+    // Tick faster than the quiet window so a slow CDN fetch cannot outrun it.
+    const period = Math.max(25, Math.min(2_000, Math.floor(quietMs / 2)));
     const timer = setInterval(tick, period);
     timer.unref?.();
     return () => clearInterval(timer);
@@ -791,8 +800,8 @@ export class WhatsAppConnection {
         parsed.mediaStatus = status;
         parsed.media = media;
         if (stale()) { parsed.media = null; continue; }
-        const debounceMs = this.config.inboundDebounceMs ?? 0;
-        if (debounceMs <= 0) {
+        const quietMs = this.burstQuietMs();
+        if (quietMs <= 0) {
           try {
             // No burst window: finish this handoff before the next message so
             // only one attachment is held during PromptQL accept/retry.

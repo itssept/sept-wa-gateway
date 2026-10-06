@@ -108,6 +108,48 @@ function resizeRgba(
   return out;
 }
 
+function jpegFile(normalized: PromptQlFileInput, bytes: Buffer): PromptQlFileInput {
+  return {
+    file_name: ensureFileName(normalized.file_name, "image/jpeg"),
+    mime_type: "image/jpeg",
+    content_base64: bytes.toString("base64"),
+  };
+}
+
+/**
+ * Decode and re-encode a JPEG under `maxBytes`. Undecodable bytes (and
+ * non-JPEGs) come back normalized so a later ask can still try them.
+ * A successful decode always prefers the fresh baseline JPEG: WhatsApp's
+ * own encoding is what PromptQL staging has been rejecting as upload_failed.
+ */
+function encodeJpegUnder(file: PromptQlFileInput, maxBytes: number, edges: number[], qualities: number[]): PromptQlFileInput {
+  const normalized = normalizePromptQlFile(file);
+  if (normalized.mime_type !== "image/jpeg") return normalized;
+  const original = Buffer.from(normalized.content_base64, "base64");
+  try {
+    const decoded = jpeg.decode(original, { useTArray: true, formatAsRGBA: true });
+    if (!decoded?.data || !decoded.width || !decoded.height) return normalized;
+    let best: Buffer | null = null;
+    for (const maxEdge of edges) {
+      const { width, height } = scaleDims(decoded.width, decoded.height, maxEdge);
+      const rgba = width === decoded.width && height === decoded.height
+        ? decoded.data
+        : resizeRgba(decoded.data as Uint8Array, decoded.width, decoded.height, width, height);
+      for (const quality of qualities) {
+        const encoded = jpeg.encode({ data: rgba, width, height }, quality);
+        if (!encoded?.data?.length) continue;
+        const out = Buffer.from(encoded.data);
+        if (!best || out.length < best.length) best = out;
+        if (out.length <= maxBytes) return jpegFile(normalized, out);
+      }
+    }
+    if (best && (best.length <= maxBytes || best.length < original.length)) return jpegFile(normalized, best);
+    return normalized;
+  } catch {
+    return normalized;
+  }
+}
+
 /**
  * Recompress image/jpeg payloads that exceed RECOMPRESS_MAX_BYTES.
  * Non-JPEG images and small JPEGs are returned unchanged (still normalized).
@@ -118,40 +160,31 @@ export function recompressPromptQlFile(file: PromptQlFileInput): PromptQlFileInp
   if (normalized.mime_type !== "image/jpeg") return normalized;
   const bytes = Buffer.from(normalized.content_base64, "base64");
   if (bytes.length <= RECOMPRESS_MAX_BYTES) return normalized;
-  try {
-    const decoded = jpeg.decode(bytes, { useTArray: true, formatAsRGBA: true });
-    if (!decoded?.data || !decoded.width || !decoded.height) return normalized;
-    let best: Buffer | null = null;
-    for (const maxEdge of [RECOMPRESS_MAX_EDGE, 1280, 1024, 800]) {
-      const { width, height } = scaleDims(decoded.width, decoded.height, maxEdge);
-      const rgba = width === decoded.width && height === decoded.height
-        ? decoded.data
-        : resizeRgba(decoded.data as Uint8Array, decoded.width, decoded.height, width, height);
-      for (const quality of [75, 60, 45, 35]) {
-        const encoded = jpeg.encode({ data: rgba, width, height }, quality);
-        if (!encoded?.data?.length) continue;
-        const out = Buffer.from(encoded.data);
-        if (!best || out.length < best.length) best = out;
-        if (out.length <= RECOMPRESS_MAX_BYTES && out.length < bytes.length) {
-          return {
-            file_name: ensureFileName(normalized.file_name, "image/jpeg"),
-            mime_type: "image/jpeg",
-            content_base64: out.toString("base64"),
-          };
-        }
-      }
-    }
-    if (best && best.length < bytes.length) {
-      return {
-        file_name: ensureFileName(normalized.file_name, "image/jpeg"),
-        mime_type: "image/jpeg",
-        content_base64: best.toString("base64"),
-      };
-    }
-    return normalized;
-  } catch {
-    return normalized;
-  }
+  return encodeJpegUnder(normalized, RECOMPRESS_MAX_BYTES, [RECOMPRESS_MAX_EDGE, 1280, 1024, 800], [75, 60, 45, 35]);
+}
+
+/**
+ * Bytes PromptQL should actually receive for one image. A burst of photos
+ * shares the MCP body budget so 34 images still fit in one ask_promptql.
+ */
+export function stageImageForUpload(file: PromptQlFileInput, maxBytes: number): PromptQlFileInput {
+  const cap = Math.max(16 * 1024, maxBytes);
+  return encodeJpegUnder(
+    file,
+    cap,
+    [Math.min(BRIDGE_MAX_EDGE, 1280), 1024, 800, 640],
+    [60, 45, 35, 28],
+  );
+}
+
+/** Fit every image in one files[] body. Non-images are only normalized. */
+export function stagePromptQlFiles(
+  files: readonly PromptQlFileInput[],
+  budgetBytes: number,
+): PromptQlFileInput[] {
+  const images = files.filter((f) => isImagePromptQlFile(f)).length || 1;
+  const perImage = Math.max(48 * 1024, Math.min(RECOMPRESS_MAX_BYTES, Math.floor(budgetBytes / images)));
+  return files.map((f) => (isImagePromptQlFile(f) ? stageImageForUpload(f, perImage) : normalizePromptQlFile(f)));
 }
 
 /**

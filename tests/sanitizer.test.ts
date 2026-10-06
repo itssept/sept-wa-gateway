@@ -78,6 +78,16 @@ Let me know if you would like me to reserve it!`;
     expect(sanitized).toContain("https://www.chanel.com/us/");
   });
 
+  it("drops the SEPT was stopped line from an interrupted photo run", () => {
+    expect(sanitizeOutboundText("SEPT was stopped.")).toBe("");
+    expect(sanitizeOutboundText("SEPT was stopped")).toBe("");
+    expect(isLifecycleOnlyOutbound("SEPT was stopped.")).toBe(true);
+    const mixed = "The red look is available.\nSEPT was stopped.";
+    expect(sanitizeOutboundText(mixed)).toContain("The red look is available.");
+    expect(sanitizeOutboundText(mixed)).not.toContain("stopped");
+    expect(isLifecycleOnlyOutbound(mixed)).toBe(false);
+  });
+
   it("drops a PromptQL cancel banner, internal URLs, and run ids", () => {
     const live = `⚠️ SEPT's run was cancelled before it could finish.
 

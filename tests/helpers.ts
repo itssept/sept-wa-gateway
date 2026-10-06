@@ -33,6 +33,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     captureGroupHistory: true,
     historyJoinWaitMs: 0,
     inboundDebounceMs: 0,
+    mediaBurstMs: 0,
     inFlightWaitMs: 0,
     relayUnregisteredChats: false,
     orgCraftInject: false,

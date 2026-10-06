@@ -40,7 +40,7 @@ const FAILURE_NOTE_RE = /\n\n(\((?:Attachment|\d+ attachments)[^)\n]*\))$/;
 
 /** PromptQL system-banner phrasing. Not client copy about a cancelled order. */
 const LIFECYCLE_SIGNAL =
-  /interrupted_due_to_new_trigger|\brun (?:was |has been )?cancell?ed before it could finish\b|\u26A0\uFE0F?[^\n]{0,80}\brun was cancell?ed\b|SEPT['’]?s\s+run\s+was\s+cancell?ed|PromptQL\s+run\s+(?:was\s+)?cancell?ed|(?:^|\n)\s*(?:status|run status|error|reason)\s*:\s*(?:failed|error|cancell?ed|canceled|interrupted)\b/i;
+  /interrupted_due_to_new_trigger|\brun (?:was |has been )?cancell?ed before it could finish\b|\u26A0\uFE0F?[^\n]{0,80}\brun was cancell?ed\b|SEPT['’]?s\s+run\s+was\s+cancell?ed|PromptQL\s+run\s+(?:was\s+)?cancell?ed|\bSEPT was stopped\b|(?:^|\n)\s*(?:status|run status|error|reason)\s*:\s*(?:failed|error|cancell?ed|canceled|interrupted)\b/i;
 
 const SAFE_FAILURE_REASONS = new Set([
   "interrupted_due_to_new_trigger",
@@ -243,6 +243,8 @@ function stripLifecycleCopy(text: string): string {
     // "PromptQL run was cancelled." has no "before it could finish" clause.
     .replace(/\u26A0\uFE0F?\s*SEPT['’]?s\s+run\s+was\s+cancell?ed[^\n.]*(?:\.|!)?/gi, "")
     .replace(/SEPT['’]?s\s+run\s+was\s+cancell?ed\s+before\s+it\s+could\s+finish\.?/gi, "")
+    // Live 2026-10-06: interrupting a photo ask completed as this one line.
+    .replace(/^[ \t]*SEPT was stopped\.?[ \t]*$/gim, "")
     .replace(/PromptQL\s+run\s+(?:was\s+)?cancell?ed[^\n.]*(?:\.|!)?/gi, "")
     .replace(/[^\n.!?]*\brun (?:was |has been )?cancell?ed before it could finish\b[^\n.!?]*/gi, "")
     .replace(/^[ \t]*\u26A0\uFE0F?[^\n]*\brun was cancell?ed\b[^\n]*$/gim, "")
