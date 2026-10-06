@@ -23,7 +23,7 @@ import {
   selectDocumentArtifactRefs,
   preferPdfInvoiceArtifacts,
   type PromptQlAdapter, type ArtifactOutcome, type ArtifactFailureReason,
-  type ResponseArtifact,
+  type ResolvedArtifact, type ResponseArtifact,
 } from "../promptql/promptqlAdapter.ts";
 import type { McpWorkflowRepo } from "../storage/mcpWorkflowRepo.ts";
 import type { OutboundLog } from "../storage/outboundLog.ts";
@@ -36,6 +36,13 @@ import { maskJid } from "../util.ts";
 import type { WelcomeLogRepo } from "../storage/welcomeLog.ts";
 import { documentCaption, isLifecycleOnlyOutbound, isPromptQlEnvelopeOutbound, outboundFailureReason, sanitizeOutboundText } from "./sanitizer.ts";
 import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
+import {
+  claimsInvoiceDelivery,
+  ensureInvoiceDelivery,
+  invoiceDocumentCaption,
+  isApplicationPdf,
+  isPdfishArtifactRef,
+} from "./invoicePdfGuard.ts";
 
 export interface DispatchInput {
   workflowId: string;
@@ -53,6 +60,11 @@ export interface DispatchInput {
   isWelcomeDispatch?: boolean;
   /** If true, prepends the approved operator welcome header to the response */
   welcomePrefix?: boolean;
+  /**
+   * The operator/client text that triggered this turn. Used only to fill an
+   * invoice PDF when the model claimed one without emitting a file. Never logged.
+   */
+  operatorText?: string;
 }
 
 export class OutboundDispatcher {
@@ -165,9 +177,62 @@ export class OutboundDispatcher {
     }
     // Prefer a native PDF when invoice sidecars also resolved.
     outcomes = preferPdfInvoiceArtifacts(outcomes);
-    const artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
+    let artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
     // not_attachable = intentional skip (json/md) — do not surface as a user failure note.
-    const failures = outcomes.flatMap((o) => (o.ok || o.reason === "not_attachable" ? [] : [o.reason]));
+    let failures = outcomes.flatMap((o) => (o.ok || o.reason === "not_attachable" ? [] : [o.reason]));
+
+    // Invoice/PDF claims with no real PDF must not leave as a bare ql.app link
+    // or as a sentence that says the PDF was sent. Recover a stored PDF, build
+    // one from facts already in the turn, or say we are still preparing it.
+    let invoiceCaptionOnly = false;
+    const reply = answer ?? "";
+    if (completed && claimsInvoiceDelivery(reply) && !artifacts.some(isApplicationPdf)) {
+      const referencedPdf = refs.some((ref) => {
+        const listed = responseArtifacts.find((a) => a.identifier === ref.identifier);
+        return isPdfishArtifactRef(
+          { identifier: ref.identifier, type: ref.type ?? listed?.artifact_type ?? null },
+          listed?.title,
+        );
+      });
+      let recovered: ResolvedArtifact | null = null;
+      if (input.threadId && typeof this.adapter.recoverInvoicePdf === "function") {
+        try {
+          recovered = await this.adapter.recoverInvoicePdf(
+            { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" },
+            input.threadId,
+            this.config.mcp.maxArtifactBytes,
+          );
+        } catch (err) {
+          log.warn("invoice pdf recovery failed", { err });
+        }
+      }
+      const decision = ensureInvoiceDelivery({
+        reply,
+        operatorText: input.operatorText,
+        hasPdf: false,
+        referencedPdf,
+        recovered,
+        maxBytes: this.config.mcp.maxArtifactBytes,
+      });
+      if (decision.kind === "attach") {
+        artifacts = [decision.artifact];
+        failures = [];
+        invoiceCaptionOnly = true;
+        log.info("invoice pdf guard", { source: decision.source });
+      } else if (decision.kind === "preparing") {
+        artifacts = [];
+        failures = [];
+        strippedAnswer = decision.text;
+        log.info("invoice pdf guard", { source: "preparing" });
+      }
+    } else if (
+      artifacts.some((artifact) =>
+        isApplicationPdf(artifact) &&
+        (claimsInvoiceDelivery(reply) || /invoice|sept[_-]inv\b/i.test(`${artifact.identifier} ${artifact.title}`)),
+      )
+    ) {
+      invoiceCaptionOnly = true;
+    }
 
     // Prepend welcome header if requested for first inbound DM with request
     const fullAnswer = input.welcomePrefix
@@ -185,7 +250,9 @@ export class OutboundDispatcher {
     const noted = withFailureNote(sanitizedText.trim(), failures);
     const [first, ...rest] = artifacts;
     const caption = first
-      ? documentCaption(noted, input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined)
+      ? (invoiceCaptionOnly
+        ? invoiceDocumentCaption(input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined)
+        : documentCaption(noted, input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined))
       : noted;
     if (caption === "" && artifacts.length === 0) {
       // Nothing to say and nothing to attach — treat like an empty response.

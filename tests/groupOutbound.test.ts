@@ -311,7 +311,7 @@ test("dispatcher automatically attaches responseArtifacts when PromptQL server c
             title: "Invoice INV-3288",
             fileName: "INV-3288.pdf",
             mimeType: "application/pdf",
-            bytes: Buffer.from("PDF_BYTES"),
+            bytes: Buffer.from("%PDF-1.4\nPDF_BYTES"),
           },
         }];
       },
@@ -337,9 +337,8 @@ test("dispatcher automatically attaches responseArtifacts when PromptQL server c
   expect(sentDoc).not.toBeNull();
   expect(sentDoc.fileName).toBe("INV-3288.pdf");
   expect(sentDoc.mimeType).toBe("application/pdf");
-  expect(sentDoc.bytes.toString()).toBe("PDF_BYTES");
-  // Permalinks and Teach SEPT links are cleaned from caption
-  expect(sentDoc.caption).toContain("Logged Noor in IT 40.");
+  expect(sentDoc.bytes.toString()).toContain("%PDF-1.4");
+  expect(sentDoc.caption).toBe("Here is the commercial invoice.");
   expect(sentDoc.caption).not.toContain("Teach SEPT");
   expect(sentDoc.caption).not.toContain("https://ql.app/l/i44VehWS");
   expect(sentDoc.caption).not.toContain("https://ql.app/l/Xxfa0Am6");

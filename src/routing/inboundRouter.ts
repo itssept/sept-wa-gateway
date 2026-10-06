@@ -589,6 +589,9 @@ export class InboundRouter {
           pacingProfile: responseIdentity.role === "pa" ? "pa_reply" : "default",
           isWelcomeDispatch: isRequestFirstDM,
           welcomePrefix: isRequestFirstDM,
+          // Invoice guard reads this only when the reply claims a PDF and none
+          // was emitted. The body is not logged.
+          operatorText: rawQuery,
         }).catch((err) => log.error("outbound dispatch failed", { err }));
       }
     } catch (err) {

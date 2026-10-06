@@ -71,8 +71,8 @@ def generate_invoice_pdf(deal_data: dict) -> bytes:
 
     story = []
     
-    # Header
-    story.append(Paragraph("SEPT LUXURY CONCIERGE", title_style))
+    # Header is the word SEPT. Do not substitute a generic concierge banner.
+    story.append(Paragraph("SEPT", title_style))
     story.append(Paragraph("Commercial Invoice & Acquisition Confirmation | Confidential", subtitle_style))
     story.append(Spacer(1, 15))
     

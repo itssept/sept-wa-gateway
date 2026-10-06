@@ -636,3 +636,48 @@ test("waitForResponse completed with empty message + envelope text yields empty 
   );
   expect(res).toEqual({ status: "completed", message: "", artifacts: [] });
 });
+
+test("recoverInvoicePdf downloads a stored application/pdf and skips json sidecars", async () => {
+  const pdf = Buffer.from("%PDF-1.4\nsept invoice");
+  const { toolCalls } = scriptByTool({
+    toolResults: [
+      { result: { structuredContent: { artifacts: [
+        {
+          identifier: "invoice_dina_json",
+          title: "invoice_dina.json",
+          artifact_type: "json",
+          artifact_reference: { artifact_id: "art-json", version: 0 },
+        },
+        {
+          identifier: "sept_invoice_20332",
+          title: "INV-20332.pdf",
+          artifact_type: "file",
+          artifact_reference: { artifact_id: "art-pdf", version: 0 },
+          metadata: { file: { content_type: "application/pdf", file_name: "INV-20332.pdf" } },
+        },
+      ] } } },
+      { result: { content: [
+        { type: "resource", resource: { blob: pdf.toString("base64"), mimeType: "application/pdf" } },
+      ] } },
+    ],
+  });
+  const art = await new PromptQlAdapter(deps).recoverInvoicePdf("shopper-1", "thread-1", 1024 * 1024);
+  expect(toolCalls.map((call) => call.name)).toEqual([
+    "list_promptql_thread_artifact_metadata",
+    "download_promptql_artifact",
+  ]);
+  expect(toolCalls[1]!.args).toEqual({ artifact_id: "art-pdf", version: 0 });
+  expect(art?.mimeType).toBe("application/pdf");
+  expect(art?.bytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  expect(art?.bytes.toString("latin1")).toContain("sept invoice");
+});
+
+test("recoverInvoicePdf returns null when the thread has no PDF", async () => {
+  scriptByTool({
+    toolResults: [
+      { result: { isError: true, content: [{ type: "text", text: "unknown tool" }] } },
+    ],
+  });
+  const art = await new PromptQlAdapter(deps).recoverInvoicePdf("shopper-1", "thread-1", 1024);
+  expect(art).toBeNull();
+});
