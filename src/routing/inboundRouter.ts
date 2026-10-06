@@ -26,6 +26,7 @@ import { clientQuery, mediaLabel, paPrompt } from "./groupRelay.ts";
 import { formatClientEnvelope } from "../promptql/clientEnvelope.ts";
 import { phoneE164FromJid, maskJid, nowIso } from "../util.ts";
 import { isPureGreeting, OPERATOR_WELCOME_PROMPT } from "../domain/welcomeMessage.ts";
+import { withInvoiceTurnContract } from "../craft/orgCraft.ts";
 
 export interface RoutingDeps {
   settings: GatewaySettingsRepo;
@@ -48,6 +49,13 @@ export interface RoutingDeps {
   ephemeralMedia?: EphemeralMediaStore;
   /** Public origin for bridge URLs (empty = bridge disabled). */
   publicBaseUrl?: string;
+  /**
+   * Max time a new triggering turn waits for the chat's in-flight PromptQL run
+   * before it is submitted anyway (ms). PromptQL cancels the running turn on a
+   * new trigger (`interrupted_due_to_new_trigger`), so a follow-up waits
+   * instead of killing the answer. 0 disables the wait.
+   */
+  inFlightWaitMs?: number;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -59,6 +67,34 @@ const AGENT_ACK_EMOJI = "👀";
  * size, send the files as separate posts instead of building that body.
  */
 const MULTI_FILE_UPLOAD_BUDGET_BYTES = 5 * 1024 * 1024;
+/**
+ * Default: a real follow-up (new text or photo) is sent at once. PromptQL then
+ * stops the older run and the newest run answers with the whole thread in
+ * context, which is how a photo + caption + "invoice this" burst coalesces
+ * into one reply (live Hello thread 2026-10-06 16:43 Rome). Set
+ * GATEWAY_IN_FLIGHT_WAIT_MS > 0 to wait for the running answer instead.
+ */
+const DEFAULT_IN_FLIGHT_WAIT_MS = 0;
+
+/**
+ * True when a batch is only re-tags of the bot ("@SEPT", "@16503134725", "?",
+ * "pls") with no media: it carries no new ask. Sending it as a trigger would
+ * cancel the run that is already answering the real question.
+ */
+export function isBareRetag(
+  messages: Pick<InboundMessage, "text" | "mediaStatus" | "media" | "msgType">[],
+): boolean {
+  if (!messages.length) return false;
+  return messages.every((m) => {
+    if (m.media || m.mediaStatus === "ready") return false;
+    if (m.msgType && m.msgType !== "text") return false;
+    const rest = (m.text ?? "")
+      .replace(/@[\w.+-]+/g, " ")
+      .replace(/[\s?!.,\u2026]+/g, "")
+      .replace(/^(pls|please|ping|hello|hi|hey)$/i, "");
+    return rest.length === 0;
+  });
+}
 interface Destination {
   owner: Shopper | null;
   ownerId: string | null;
@@ -89,6 +125,8 @@ export class InboundRouter {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly epochs = new Map<string, number>();
   private readonly clientBuffers = new Map<string, InboundBuffer>();
+  /** Chat key -> outbound dispatch of the PromptQL run currently in flight. */
+  private readonly inFlight = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly resolver: ShopperResolver,
@@ -362,7 +400,7 @@ export class InboundRouter {
     // destination. Keep the old mapping until MCP returns a new handle.
     const promoting = existing?.shopperId === null && dest.ownerId !== null;
     try {
-      const systemInstruction = this.deps.orgCraftSystemInstruction || undefined;
+      const systemInstruction = withInvoiceTurnContract(this.deps.orgCraftSystemInstruction, query);
       const ask = await this.adapter.ask(identity, {
         query, threadId: promoting ? null : existing?.threadId ?? null,
         roomName: !existing || promoting ? dest.roomName : null, agentResponse, files,
@@ -507,7 +545,33 @@ export class InboundRouter {
       }
       const hadReadyMedia = files.length > 0;
       shopperMediaAsk = identity.role === "shopper" && hadReadyMedia && !firstMsg.fromMe;
-      const agentResponse = (shopperTrigger && !isGreetingFirstDM) ? "force_respond" as const : "force_skip" as const;
+      let agentResponse: "force_respond" | "force_skip" =
+        (shopperTrigger && !isGreetingFirstDM) ? "force_respond" : "force_skip";
+      const chatKey = this.key(firstMsg.connectionId, firstMsg.chatJid);
+      let retagOnly = false;
+      const running = this.inFlight.get(chatKey);
+      if (agentResponse === "force_respond" && running) {
+        if (isBareRetag(validMessages)) {
+          // Live 2026-10-06 16:39 Rome: a burst of bare @SEPT re-tags cancelled
+          // every run ("SEPT was stopped"). The running turn already owns the
+          // ask; relay the ping as context only so it is not interrupted.
+          retagOnly = true;
+          agentResponse = "force_skip";
+          log.info("bare re-tag while a run is in flight; relayed as context only");
+        } else {
+          // A real follow-up waits for the running answer instead of killing it.
+          const capMs = this.deps.inFlightWaitMs ?? DEFAULT_IN_FLIGHT_WAIT_MS;
+          if (capMs > 0) {
+            log.info("follow-up while a run is in flight; waiting for it to finish", { capMs });
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+              running.catch(() => undefined),
+              new Promise<void>((r) => { timer = setTimeout(r, capMs); }),
+            ]);
+            if (timer) clearTimeout(timer);
+          }
+        }
+      }
 
       // Normalize mime/filename before the first ask (strip ;params, sniff magic).
       for (let i = 0; i < files.length; i++) files[i] = normalizePromptQlFile(files[i]!);
@@ -528,12 +592,12 @@ export class InboundRouter {
       }
 
       let responseIdentity = identity;
-      if (paTrigger && this.available(firstMsg, epoch)) {
+      if (paTrigger && !retagOnly && this.available(firstMsg, epoch)) {
         responseIdentity = { role: "pa", shopperId: dest.owner!.id };
         ask = await this.submit(firstMsg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
       }
 
-      if ((!shopperTrigger && !paTrigger && !isGreetingFirstDM) || !this.available(firstMsg, epoch)) {
+      if (retagOnly || (!shopperTrigger && !paTrigger && !isGreetingFirstDM) || !this.available(firstMsg, epoch)) {
         for (const { msg, token } of claimedTokens) {
           this.outboundLog.markRelayed(msg.connectionId, msg.messageId, token, msg.chatJid);
         }
@@ -576,7 +640,7 @@ export class InboundRouter {
           isWelcomeDispatch: true,
         }).catch((err) => log.error("direct welcome dispatch failed", { err }));
       } else {
-        void this.dispatcher.dispatch({
+        const dispatched = this.dispatcher.dispatch({
           workflowId: workflow.id,
           connectionId: firstMsg.connectionId,
           chatJid: firstMsg.chatJid,
@@ -593,6 +657,10 @@ export class InboundRouter {
           // was emitted. The body is not logged.
           operatorText: rawQuery,
         }).catch((err) => log.error("outbound dispatch failed", { err }));
+        this.inFlight.set(chatKey, dispatched);
+        void dispatched.finally(() => {
+          if (this.inFlight.get(chatKey) === dispatched) this.inFlight.delete(chatKey);
+        });
       }
     } catch (err) {
       for (const { msg, token } of claimedTokens) {

@@ -12,7 +12,7 @@ This runbook establishes standard operating procedures and technical specificati
   ```xml
   <artifact type="file" identifier="sept_invoice_<deal_id>" />
   ```
-- **Gateway Dispatch Mechanism**: `src/routing/outboundDispatcher.ts` attaches a real `application/pdf` as a WhatsApp document. The caption is one plain sentence: `Here is the commercial invoice.` If the model claims an invoice but emits no PDF, the gateway downloads a stored thread PDF or builds a SEPT-branded PDF from invoice facts already in the turn (header is the word SEPT). If it cannot produce a real PDF, it sends `Preparing the invoice. I will send it in this chat when it is ready.` It never sends a bare `ql.app` invoice link, and it never says a PDF was sent when it was not.
+- **Gateway Dispatch Mechanism**: `src/routing/outboundDispatcher.ts` attaches a real `application/pdf` as a WhatsApp document. The caption is one plain sentence: `Here is the commercial invoice.` If the model claims an invoice but emits no PDF — including an HTML artifact chip — the gateway downloads a stored thread PDF or builds a SEPT-branded PDF from invoice facts already in the turn (header is the word SEPT). If it cannot produce a real PDF, it sends `Preparing the invoice. I will send it in this chat when it is ready.` It never sends a bare `ql.app` invoice link or an HTML chip as a document, and it never says a PDF was sent when it was not.
 - **Client Experience**: The client receives a native PDF attachment directly in chat, which opens in the device's native PDF viewer with zero external web navigation or link-unfurling warnings.
 
 ### B. Instagram Direct Messages

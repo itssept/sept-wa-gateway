@@ -238,6 +238,74 @@ test("a failed official PDF download is not replaced by a chat-built file", asyn
   db.close();
 });
 
+test("HTML invoice chip on 'invoice this' is not sent; no facts becomes the preparing line", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const html = Buffer.from("<!DOCTYPE html><html><body><h1>Invoice</h1></body></html>");
+  const { dispatcher, sent } = dispatchHarness(
+    ctx,
+    "Commercial invoice\nhttps://ql.app/l/AbCdEf12\n<artifact type=\"html\" identifier=\"invoice_card\" />",
+    {
+      artifacts: [{
+        identifier: "invoice_card",
+        title: "Invoice",
+        artifact_type: "html",
+        artifact_reference: { artifact_id: "art-html", version: 0 },
+      }],
+      resolve: () => [{
+        ok: true,
+        artifact: {
+          identifier: "invoice_card",
+          title: "Invoice",
+          fileName: "invoice.html",
+          mimeType: "application/pdf",
+          bytes: html,
+        },
+      }],
+    },
+  );
+  await claimAndDispatch(ctx, dispatcher, "html-chip", "Invoice this");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(INVOICE_PREPARING_TEXT);
+  expect(sent.text).not.toContain("ql.app");
+  expect(sent.text?.toLowerCase()).not.toContain("<html");
+  db.close();
+});
+
+test("HTML chip plus invoice facts becomes a branded PDF, not the chip", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, sent } = dispatchHarness(
+    ctx,
+    "<artifact type=\"html\" identifier=\"invoice_card\" />",
+    {
+      artifacts: [{
+        identifier: "invoice_card",
+        title: "invoice.html",
+        artifact_type: "file",
+        artifact_reference: { artifact_id: "art-html", version: 0 },
+      }],
+      resolve: () => [{ ok: false, identifier: "invoice_card", reason: "not_attachable" }],
+    },
+  );
+  await claimAndDispatch(ctx, dispatcher, "html-facts", LIVE_ASK);
+  expect(sent.text).toBeUndefined();
+  expect(sent.doc?.mimeType).toBe("application/pdf");
+  expect(sent.doc?.bytes.toString("latin1").startsWith("%PDF-")).toBe(true);
+  expect(sent.doc?.caption).toBe(INVOICE_PDF_CAPTION);
+  expect(sent.doc?.bytes.toString("latin1")).toContain("INV-20332");
+  expect(sent.doc?.bytes.toString("latin1")).not.toContain("<html");
+  db.close();
+});
+
+test("an invoice question is not replaced when the reply is a clarification", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const reply = "Which client should I use?";
+  const { dispatcher, sent } = dispatchHarness(ctx, reply);
+  await claimAndDispatch(ctx, dispatcher, "clarify", "Invoice this");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(reply);
+  db.close();
+});
+
 test("non-invoice messages are unchanged", async () => {
   const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
   const status = "The Kelly 28 is available in gold.";

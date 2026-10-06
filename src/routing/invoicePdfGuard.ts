@@ -17,6 +17,7 @@
  */
 
 import type { ResolvedArtifact } from "../promptql/promptqlAdapter.ts";
+import { operatorRequestsInvoice } from "../craft/orgCraft.ts";
 import { sanitizeOutboundText } from "./sanitizer.ts";
 
 export const INVOICE_PDF_CAPTION = "Here is the commercial invoice.";
@@ -67,6 +68,35 @@ export function claimsInvoiceDelivery(text: string): boolean {
   const delivering = DELIVERY.test(visible);
   if (hasInvoice && (PDF_WORD.test(visible) || delivering)) return true;
   return /\b(?:pdf\s+invoices?|invoices?\s+pdf)\b/i.test(visible);
+}
+
+/** HTML chip, .html name, or an HTML document dumped into the reply. */
+export function isHtmlArtifactSignal(
+  ref: { identifier: string; type?: string | null },
+  title?: string | null,
+  artifactType?: string | null,
+): boolean {
+  const type = (ref.type ?? artifactType ?? "").toLowerCase();
+  if (type === "html") return true;
+  return /\.html?(?:\b|$)/i.test(`${ref.identifier} ${title ?? ""}`);
+}
+
+/**
+ * Run the invoice PDF guard when the reply presents an invoice, or when the
+ * operator asked for one and the model answered with an HTML chip or a
+ * permalink. A clarifying question with neither is left alone.
+ */
+export function shouldEnforceInvoicePdf(input: {
+  reply: string;
+  operatorText?: string | null;
+  htmlSubstitute: boolean;
+}): boolean {
+  if (claimsInvoiceDelivery(input.reply)) return true;
+  if (!operatorRequestsInvoice(input.operatorText ?? "")) return false;
+  if (input.htmlSubstitute) return true;
+  if (/ql\.app/i.test(input.reply)) return true;
+  if (/<!doctype\s+html|<\s*html\b/i.test(input.reply)) return true;
+  return false;
 }
 
 export function isApplicationPdf(artifact: { mimeType: string; bytes: Buffer }): boolean {
@@ -128,8 +158,11 @@ export function ensureInvoiceDelivery(input: {
   recovered: ResolvedArtifact | null;
   maxBytes: number;
   issuedOn?: Date;
+  /** Caller already decided this turn must not leave without a PDF. */
+  enforce?: boolean;
 }): InvoiceDeliveryDecision {
-  if (!claimsInvoiceDelivery(input.reply) || input.hasPdf) return { kind: "unchanged" };
+  if (input.hasPdf) return { kind: "unchanged" };
+  if (!input.enforce && !claimsInvoiceDelivery(input.reply)) return { kind: "unchanged" };
 
   if (input.recovered && isApplicationPdf(input.recovered) && input.recovered.bytes.length <= input.maxBytes) {
     return { kind: "attach", source: "thread", artifact: input.recovered };

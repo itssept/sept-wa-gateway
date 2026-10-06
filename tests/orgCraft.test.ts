@@ -6,10 +6,21 @@ import {
   assertCraftOnly,
   formatCraftSystemInstruction,
   loadOrgCraftSystemInstruction,
+  operatorRequestsInvoice,
   type OrgCraftPlaybook,
 } from "../src/craft/orgCraft.ts";
 import type { InboundMessage } from "../src/whatsapp/socket.ts";
 import type { PostingIdentity } from "../src/promptql/promptqlAdapter.ts";
+
+test("invoice asks are detected without treating a question or the bridge boilerplate as one", () => {
+  expect(operatorRequestsInvoice("Invoice this")).toBe(true);
+  expect(operatorRequestsInvoice("@SEPT invoice this")).toBe(true);
+  expect(operatorRequestsInvoice("PDF invoice for the Chanel")).toBe(true);
+  expect(operatorRequestsInvoice("What invoice number did we use?")).toBe(false);
+  const bridge = "Fetch each URL for item identification / invoice generation.\nOperator message:\nHello";
+  expect(operatorRequestsInvoice(bridge)).toBe(false);
+  expect(operatorRequestsInvoice(`${bridge.replace("Hello", "Invoice this")}`)).toBe(true);
+});
 
 test("default seeds format without PII reject", () => {
   for (const p of DEFAULT_CRAFT_PLAYBOOKS) assertCraftOnly(p);
@@ -26,6 +37,9 @@ test("default seeds format without PII reject", () => {
   expect(text).not.toContain("SEPT LUXURY CONCIERGE");
   expect(text).toContain("one short plain sentence");
   expect(text).toContain("No markdown headers/bullets/code ticks.");
+  expect(text).toContain("An HTML chip is not an invoice.");
+  expect(text).toContain("invoice this");
+  expect(text).toContain("content_type application/pdf");
   expect(text).toContain("item_id_grounded_search");
   expect(text).toContain("sizing_eu_narrow_notes");
   expect(text).toContain("logistics_truth_gate");
@@ -57,6 +71,8 @@ test("load respects enable flag and inline override", () => {
     inlineInstruction: "ORG SHARED CRAFT\nUse branded PDF only.",
   });
   expect(inline).toContain("branded PDF");
+  expect(inline).toContain("function generate_invoice_pdf");
+  expect(inline).toContain("application/pdf");
   const blocked = loadOrgCraftSystemInstruction({
     enabled: true,
     inlineInstruction: "Send the supplier_phone and the quote.",
@@ -86,6 +102,7 @@ test("load from JSON file stub", () => {
     readFileSync: () => JSON.stringify(filePlaybooks),
   });
   expect(text).toContain("market_tags_ref");
+  expect(text).toContain("function generate_invoice_pdf");
   expect(text).not.toMatch(/\b(client_|phone|price|margin|quote|bank_)\b/i);
 });
 
@@ -143,7 +160,8 @@ test("ask receives org craft as systemInstruction and not the message body", asy
   };
   await router.handle(msg);
   expect(calls).toHaveLength(1);
-  expect(calls[0]!.input.systemInstruction).toBe(craft);
+  expect(calls[0]!.input.systemInstruction).toContain(craft);
+  expect(calls[0]!.input.systemInstruction).toContain("THIS TURN IS AN INVOICE REQUEST");
   expect(calls[0]!.input.systemInstruction).toContain(
     "run deal_execution_flow.generate_invoice_pdf and return the application/pdf artifact instead of a link.",
   );

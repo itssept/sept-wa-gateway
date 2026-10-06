@@ -99,6 +99,8 @@ const EnvSchema = z.object({
   // Inbound message debounce buffer window (ms).
   // Buffers rapid inbound messages from the same client into a single turn.
   WHATSAPP_INBOUND_DEBOUNCE_MS: z.coerce.number().int().nonnegative().max(60_000).default(5_000),
+  // Wait for an in-flight PromptQL run before sending a follow-up trigger (0 = send at once).
+  GATEWAY_IN_FLIGHT_WAIT_MS: z.coerce.number().int().nonnegative().max(600_000).default(0),
 
   // Retention.
   WHATSAPP_MESSAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
@@ -169,6 +171,7 @@ export interface Config {
   captureGroupHistory: boolean;
   historyJoinWaitMs: number;
   inboundDebounceMs: number;
+  inFlightWaitMs: number;
   /** Relay ownerless (unregistered/unqualified) chats to the common room. */
   relayUnregisteredChats: boolean;
   /** Public origin for ephemeral media bridge URLs; empty disables bridge. */
@@ -228,6 +231,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     captureGroupHistory: e.WHATSAPP_CAPTURE_GROUP_HISTORY,
     historyJoinWaitMs: e.WHATSAPP_HISTORY_JOIN_WAIT_MS,
     inboundDebounceMs: e.WHATSAPP_INBOUND_DEBOUNCE_MS,
+    inFlightWaitMs: e.GATEWAY_IN_FLIGHT_WAIT_MS,
     relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
     publicBaseUrl: e.GATEWAY_PUBLIC_BASE_URL.replace(/\/+$/, ""),
 

@@ -118,6 +118,8 @@ rollout.
 | `WHATSAPP_GROUP_META_TTL_MS` | `3600000` | Group metadata cache TTL. |
 | `WHATSAPP_MAX_MEDIA_BYTES` | `7340032` | Raw-media limit, capped at 7 MiB. Media stays in memory only while `ask_promptql` accepts or retries the request. |
 | `WHATSAPP_INBOUND_DEBOUNCE_MS` | `5000` | Inbound message debounce buffer window in milliseconds (0–60000ms, default 5000ms). Buffers rapid multi-part messages per client into a single PromptQL turn. **Added latency**: Inbound messages wait up to the debounce window (5s by default) from the initial message before flushing to PromptQL. |
+| `GATEWAY_IN_FLIGHT_WAIT_MS` | `0` | While a PromptQL run is in flight, a bare `@SEPT` / `?` / `pls` re-tag is relayed as context (`force_skip`) and does not cancel it. A real follow-up (new text or photo) is sent at once when this is `0`. Set it (max 600000) to wait that many milliseconds for the running answer before submitting the follow-up. |
+| `GATEWAY_PUBLIC_BASE_URL` | empty | Origin PromptQL Cloud uses to fetch a photo after `upload_failed`. Must be reachable on port 80 or 443, and the proxy must forward `GET` and `HEAD /api/v1/ephemeral-media/:token` to this process. A non-standard port or an unproxied path returns 404 to PromptQL. |
 | `WHATSAPP_MESSAGE_RETENTION_DAYS` | `90` | Retention window (purge job not yet wired). |
 | `RELAY_UNREGISTERED_CHATS` | `false` | Relay ownerless chats (unregistered DM sender, unqualified group) to the common room. Default drops them (audited as `inbound.rejected`, reason `unregistered_chat_relay_disabled`) until an enabled registered shopper qualifies the chat. Strict boolean. |
 | `PROMPTQL_MCP_AUTH_SCHEME` | `pat` | Auth scheme prefixed to the per-shopper token. |

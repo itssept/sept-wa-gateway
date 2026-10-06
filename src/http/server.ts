@@ -111,6 +111,7 @@ async function main(): Promise<void> {
       reactToMessage: (msg, emoji) => connection.sendReaction(msg, emoji),
       relayUnregisteredChats: config.relayUnregisteredChats,
       inboundDebounceMs: config.inboundDebounceMs,
+      inFlightWaitMs: config.inFlightWaitMs,
       orgCraftSystemInstruction,
       ephemeralMedia,
       publicBaseUrl: config.publicBaseUrl,
