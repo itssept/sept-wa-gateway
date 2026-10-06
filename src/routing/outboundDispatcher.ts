@@ -22,6 +22,7 @@ import {
   parseArtifactRefs,
   selectDocumentArtifactRefs,
   preferPdfInvoiceArtifacts,
+  looksLikeHtmlBytes,
   type PromptQlAdapter, type ArtifactOutcome, type ArtifactFailureReason,
   type ResolvedArtifact, type ResponseArtifact,
 } from "../promptql/promptqlAdapter.ts";
@@ -41,7 +42,9 @@ import {
   ensureInvoiceDelivery,
   invoiceDocumentCaption,
   isApplicationPdf,
+  isHtmlArtifactSignal,
   isPdfishArtifactRef,
+  shouldEnforceInvoicePdf,
 } from "./invoicePdfGuard.ts";
 
 export interface DispatchInput {
@@ -178,21 +181,34 @@ export class OutboundDispatcher {
     // Prefer a native PDF when invoice sidecars also resolved.
     outcomes = preferPdfInvoiceArtifacts(outcomes);
     let artifacts = outcomes.flatMap((o) => (o.ok ? [o.artifact] : []));
-    // not_attachable = intentional skip (json/md) — do not surface as a user failure note.
+    // HTML chips are not WhatsApp documents, even when labeled application/pdf.
+    artifacts = artifacts.filter((artifact) => !isHtmlChip(artifact));
+    // not_attachable = intentional skip (json/md/html) — do not surface as a user failure note.
     let failures = outcomes.flatMap((o) => (o.ok || o.reason === "not_attachable" ? [] : [o.reason]));
 
     // Invoice/PDF claims with no real PDF must not leave as a bare ql.app link
-    // or as a sentence that says the PDF was sent. Recover a stored PDF, build
-    // one from facts already in the turn, or say we are still preparing it.
+    // or as a sentence that says the PDF was sent. An HTML chip on an invoice
+    // ask is the same failure. Recover a stored PDF, build one from facts
+    // already in the turn, or say we are still preparing it.
     let invoiceCaptionOnly = false;
     const reply = answer ?? "";
-    if (completed && claimsInvoiceDelivery(reply) && !artifacts.some(isApplicationPdf)) {
+    const htmlSubstitute = replyHasHtmlSubstitute(reply, refs, responseArtifacts);
+    if (
+      completed &&
+      !artifacts.some(isApplicationPdf) &&
+      shouldEnforceInvoicePdf({ reply, operatorText: input.operatorText, htmlSubstitute })
+    ) {
       const referencedPdf = refs.some((ref) => {
         const listed = responseArtifacts.find((a) => a.identifier === ref.identifier);
-        return isPdfishArtifactRef(
+        if (isHtmlArtifactSignal(ref, listed?.title, listed?.artifact_type)) return false;
+        if (!isPdfishArtifactRef(
           { identifier: ref.identifier, type: ref.type ?? listed?.artifact_type ?? null },
           listed?.title,
-        );
+        )) return false;
+        // A skipped HTML/json/md file is not a failed official PDF download.
+        const skipped = outcomes.find((o) => !o.ok && o.identifier === ref.identifier);
+        if (skipped?.ok === false && skipped.reason === "not_attachable") return false;
+        return true;
       });
       let recovered: ResolvedArtifact | null = null;
       if (input.threadId && typeof this.adapter.recoverInvoicePdf === "function") {
@@ -213,6 +229,7 @@ export class OutboundDispatcher {
         referencedPdf,
         recovered,
         maxBytes: this.config.mcp.maxArtifactBytes,
+        enforce: true,
       });
       if (decision.kind === "attach") {
         artifacts = [decision.artifact];
@@ -461,6 +478,28 @@ export function cleanArtifactPermalinks(text: string): string {
  * "(2 attachments couldn't be retrieved)". Returns the text unchanged when
  * there were no failures.
  */
+function isHtmlChip(artifact: { mimeType: string; bytes: Buffer }): boolean {
+  const mime = artifact.mimeType.split(";")[0]!.trim().toLowerCase();
+  if (mime === "text/html" || mime === "application/xhtml+xml") return true;
+  return looksLikeHtmlBytes(artifact.bytes);
+}
+
+function replyHasHtmlSubstitute(
+  reply: string,
+  refs: Array<{ identifier: string; type: string | null }>,
+  artifacts: ResponseArtifact[],
+): boolean {
+  if (/<!doctype\s+html|<\s*html\b/i.test(reply)) return true;
+  if (/<artifact\b[^>]*\btype\s*=\s*"html"/i.test(reply)) return true;
+  if (refs.some((ref) => isHtmlArtifactSignal(ref, null, ref.type))) return true;
+  return artifacts.some((artifact) =>
+    isHtmlArtifactSignal(
+      { identifier: artifact.identifier, type: artifact.artifact_type },
+      artifact.title,
+      artifact.artifact_type,
+    ));
+}
+
 function withFailureNote(text: string, failures: ArtifactFailureReason[]): string {
   if (failures.length === 0) return text;
   const counts = new Map<ArtifactFailureReason, number>();

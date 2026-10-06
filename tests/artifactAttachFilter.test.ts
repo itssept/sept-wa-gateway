@@ -4,6 +4,7 @@ import {
   preferPdfInvoiceArtifacts,
   isWhatsAppAttachableMime,
   isAttachableArtifactType,
+  looksLikeHtmlBytes,
 } from "../src/promptql/promptqlAdapter.ts";
 
 test("selectDocumentArtifactRefs drops json/markdown invoice sidecars", () => {
@@ -28,6 +29,30 @@ test("selectDocumentArtifactRefs drops json/markdown invoice sidecars", () => {
     },
   ]);
   expect(refs).toEqual([{ identifier: "sept_invoice_dina", type: "file" }]);
+});
+
+test("selectDocumentArtifactRefs drops an HTML invoice chip even when the name says invoice", () => {
+  const refs = selectDocumentArtifactRefs([
+    {
+      identifier: "sept_invoice_html",
+      title: "Commercial invoice.html",
+      artifact_type: "file",
+      artifact_reference: { artifact_id: "h", version: 0 },
+    },
+    {
+      identifier: "invoice_card",
+      title: "Invoice",
+      artifact_type: "html",
+      artifact_reference: { artifact_id: "c", version: 0 },
+    },
+  ]);
+  expect(refs).toEqual([]);
+});
+
+test("looksLikeHtmlBytes rejects an HTML chip labeled as a pdf", () => {
+  expect(looksLikeHtmlBytes(Buffer.from("<!DOCTYPE html><html><body>Invoice</body></html>"))).toBe(true);
+  expect(looksLikeHtmlBytes(Buffer.from("  <html><body>chip</body></html>"))).toBe(true);
+  expect(looksLikeHtmlBytes(Buffer.from("%PDF-1.4\n"))).toBe(false);
 });
 
 test("isWhatsAppAttachableMime allows pdf/images/text and rejects json/md/html", () => {

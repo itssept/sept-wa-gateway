@@ -78,14 +78,21 @@ are covered by mocked boundary tests, not a live shopper-token test.
   inbound claim — its failure marks the outbound record failed; follow-up
   document failures do not. Never scan a declined-approval notice for artifacts.
 - Invoice PDF guard: a reply that presents an invoice or PDF without an
-  `application/pdf` artifact must not leave as a ql.app link or as a claim that
-  a PDF was sent. Attach a real PDF — a thread artifact from
-  `list_promptql_thread_artifact_metadata` plus `download_promptql_artifact`,
-  or a SEPT-branded PDF built only from invoice facts already in the turn —
-  with the caption `Here is the commercial invoice.` If no real PDF can be
-  produced, send `Preparing the invoice. I will send it in this chat when it is
-  ready.` Never ask for payment credentials. The PDF header is the word SEPT,
-  never "SEPT LUXURY CONCIERGE".
+  `application/pdf` artifact must not leave as a ql.app link, an HTML chip, or
+  a claim that a PDF was sent. HTML bytes are not a WhatsApp document, even
+  when the artifact is labeled `file` or `application/pdf`. Attach a real PDF —
+  a thread artifact from `list_promptql_thread_artifact_metadata` plus
+  `download_promptql_artifact`, or a SEPT-branded PDF built only from invoice
+  facts already in the turn — with the caption `Here is the commercial
+  invoice.` If no real PDF can be produced, send `Preparing the invoice. I
+  will send it in this chat when it is ready.` Never ask for payment
+  credentials. The PDF header is the word SEPT, never "SEPT LUXURY CONCIERGE".
+  Invoice asks (including a photo plus "invoice this") also append a
+  turn-scoped `generate_invoice_pdf` / `application/pdf` contract onto
+  `system_instruction`. Shopper text itself is not wrapped.
+- Bare re-tags while a run is in flight (`@SEPT`, `?`, `pls`, no new text and
+  no photo) are `force_skip` context, not a new `force_respond`. A real
+  follow-up still triggers at once unless `GATEWAY_IN_FLIGHT_WAIT_MS` is set.
 - Product concept: **bot**. Keep legacy `thread_id` on the wire and in storage.
 - **`src/promptql/promptqlAdapter.ts` is the only place that shapes MCP args.**
   `agent_response`, `system_instruction`, and `project_name` belong there.

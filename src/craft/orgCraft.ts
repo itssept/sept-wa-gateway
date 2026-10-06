@@ -89,13 +89,52 @@ export type OrgCraftLoadOptions = {
   readFileSync?: (path: string, encoding: "utf8") => string;
 };
 
+/**
+ * An inline or file override must not drop the invoice PDF contract.
+ * Live 2026-10-06: "Invoice this" finished as an HTML chip because the model
+ * never called generate_invoice_pdf.
+ */
+function ensureInvoicePlaybook(text: string): string {
+  if (text.includes("function generate_invoice_pdf") && text.includes("application/pdf")) return text;
+  const invoice = DEFAULT_CRAFT_PLAYBOOKS.filter((p) => p.playbook_key === "invoice_pdf_luxury_caption");
+  const block = formatCraftSystemInstruction(invoice);
+  if (!block) return text;
+  return `${text.trim()}\n\n${block}`;
+}
+
+/** Short, turn-scoped force. Shopper text stays untouched; this rides system_instruction. */
+export const INVOICE_TURN_CONTRACT =
+  "THIS TURN IS AN INVOICE REQUEST. You MUST run program sept_multimodal_recognition file deal_execution_flow.py function generate_invoice_pdf and return the application/pdf artifact instead of a link. A permalink is not an invoice. An HTML chip is not an invoice. Emit only <artifact type=\"file\" identifier=\"sept_invoice_<deal_id>\" /> whose bytes are application/pdf. Do not return HTML, markdown, JSON, or a visualization chip. If the PDF cannot be produced, say the invoice is being prepared. Never ask for payment credentials.";
+
+/**
+ * True when the operator asked for an invoice or receipt. Questions
+ * ("what invoice number") are not requests. The media-bridge wrapper is
+ * ignored so "invoice generation" in that boilerplate does not match.
+ */
+export function operatorRequestsInvoice(text: string): boolean {
+  const operator = (text.split(/Operator message:\s*/i).pop() ?? text).trim();
+  if (!operator) return false;
+  if (/^\s*(?:what|which|when|where|who|why|how)\b/i.test(operator)) return false;
+  return /\b(?:invoices?|receipts?)\b/i.test(operator);
+}
+
+export function withInvoiceTurnContract(
+  systemInstruction: string | undefined,
+  query: string,
+): string | undefined {
+  if (!operatorRequestsInvoice(query)) return systemInstruction;
+  const base = systemInstruction?.trim() ?? "";
+  if (base.includes("THIS TURN IS AN INVOICE REQUEST")) return base || undefined;
+  return base ? `${base}\n\n${INVOICE_TURN_CONTRACT}` : INVOICE_TURN_CONTRACT;
+}
+
 export function loadOrgCraftSystemInstruction(opts: OrgCraftLoadOptions): string | undefined {
   if (!opts.enabled) return undefined;
 
   const inline = opts.inlineInstruction?.trim();
   if (inline) {
     if (PII_KEY_RE.test(inline)) return undefined;
-    return inline;
+    return ensureInvoicePlaybook(inline);
   }
 
   if (opts.filePath) {
@@ -105,7 +144,7 @@ export function loadOrgCraftSystemInstruction(opts: OrgCraftLoadOptions): string
       const parsed = parsePlaybooks(JSON.parse(raw));
       if (parsed.length) {
         const formatted = formatCraftSystemInstruction(parsed);
-        return formatted || undefined;
+        if (formatted) return ensureInvoicePlaybook(formatted);
       }
     } catch {
       // Fall through to the bundled pack.
@@ -114,5 +153,5 @@ export function loadOrgCraftSystemInstruction(opts: OrgCraftLoadOptions): string
 
   if (opts.useDefaults === false) return undefined;
   const formatted = formatCraftSystemInstruction(DEFAULT_CRAFT_PLAYBOOKS);
-  return formatted || undefined;
+  return formatted ? ensureInvoicePlaybook(formatted) : undefined;
 }

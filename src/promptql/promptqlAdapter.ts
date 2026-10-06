@@ -741,6 +741,8 @@ export class PromptQlAdapter {
     let resolvedMime = extracted.mime ?? mimeForType(type) ?? "application/octet-stream";
     // Magic-byte sniff: PromptQL sometimes labels a real PDF as text/json.
     if (looksLikePdf(bytes)) resolvedMime = "application/pdf";
+    // HTML labeled as a file, octet-stream, or even application/pdf is still a chip.
+    else if (looksLikeHtmlBytes(bytes)) resolvedMime = "text/html";
 
     // Never relay json/md/html as WhatsApp documents — live regression
     // 2026-09-28 sent artifact-invoice_*.json + *.md. Also skip invoice-like
@@ -869,6 +871,20 @@ function looksLikePdf(bytes: Buffer): boolean {
     bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
 }
 
+/**
+ * PromptQL sometimes stores an invoice as an HTML chip and labels it
+ * application/octet-stream or even application/pdf. Those bytes are not a
+ * WhatsApp document. Live 2026-10-06: Hello "Invoice this" returned HTML.
+ */
+export function looksLikeHtmlBytes(bytes: Buffer): boolean {
+  if (looksLikePdf(bytes)) return false;
+  const head = bytes.subarray(0, 512).toString("utf8").replace(/^\uFEFF/, "").trimStart().toLowerCase();
+  return head.startsWith("<!doctype html")
+    || head.startsWith("<html")
+    || head.startsWith("<head")
+    || head.startsWith("<body");
+}
+
 const ListedArtifactSchema = z.object({
   identifier: z.string().min(1),
   title: z.string().nullish(),
@@ -963,6 +979,8 @@ export function selectDocumentArtifactRefs(artifacts: ResponseArtifact[]): Artif
   const candidates = artifacts.filter((a) => {
     const t = (a.artifact_type ?? "").toLowerCase();
     if (!isAttachableArtifactType(t)) return false;
+    // An HTML invoice chip named like a file must not become a WA document.
+    if (/\.html?(?:\b|$)/i.test(`${a.identifier} ${a.title ?? ""}`)) return false;
     if (t === "file" || t === "pdf" || t === "document") return true;
     if (t === "png" || t === "jpeg" || t === "jpg" || t === "image" || t === "visualization") return true;
     // Identifier hint only when type is missing/unknown — never for json/md.
