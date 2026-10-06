@@ -31,6 +31,7 @@ const TOOL_RESPOND_APPROVAL = "respond_to_promptql_approval";
 // get_promptql_artifact / list_..._metadata return metadata only (verified live:
 // get_promptql_artifact relayed a metadata JSON dump, not the bytes).
 const TOOL_DOWNLOAD_ARTIFACT = "download_promptql_artifact";
+const TOOL_LIST_ARTIFACTS = "list_promptql_thread_artifact_metadata";
 
 export interface AskResult {
   threadId: string;
@@ -663,6 +664,57 @@ export class PromptQlAdapter {
     return outcomes;
   }
 
+  /**
+   * When a completed invoice reply omitted its PDF (or replaced the tag with a
+   * permalink), look on the thread for a stored application/pdf and download
+   * it. Listing metadata is not content — bytes come only from
+   * download_promptql_artifact. Returns null when nothing usable is stored.
+   * Titles are not logged (they can carry a client name).
+   */
+  async recoverInvoicePdf(
+    shopperId: IdentityInput,
+    threadId: string,
+    maxBytes: number,
+  ): Promise<ResolvedArtifact | null> {
+    if (!threadId.trim()) return null;
+    try {
+      const session = this.session(shopperId);
+      const listed = await session.callTool(TOOL_LIST_ARTIFACTS, { thread_id: threadId });
+      const candidates = rankInvoicePdfCandidates(parseListedArtifacts(listed.structured ?? listed.raw))
+        .slice(0, 4);
+      for (const candidate of candidates) {
+        const args: Record<string, unknown> = { artifact_id: candidate.artifactId };
+        if (typeof candidate.version === "number") args.version = candidate.version;
+        try {
+          const result = await session.callTool(TOOL_DOWNLOAD_ARTIFACT, args);
+          const decoded = this.decodeArtifact(
+            { identifier: candidate.identifier, type: candidate.artifactType },
+            {
+              identifier: candidate.identifier,
+              title: candidate.title,
+              artifact_type: candidate.artifactType,
+              artifact_reference: {
+                artifact_id: candidate.artifactId,
+                version: candidate.version ?? null,
+              },
+            },
+            result.raw,
+            maxBytes,
+          );
+          if ("artifact" in decoded && looksLikePdf(decoded.artifact.bytes)) return decoded.artifact;
+        } catch (err) {
+          this.log.warn("invoice pdf candidate skipped", {
+            identifier: maskArtifact(candidate.identifier),
+            err,
+          });
+        }
+      }
+    } catch (err) {
+      this.log.warn("invoice pdf listing failed", { err });
+    }
+    return null;
+  }
+
   /** Normalize a downloaded artifact into WhatsApp-sendable bytes, or a failure
    *  reason: `too_large` past the cap, `unavailable` when empty or unrecoverable.
    *  `raw` is the download_promptql_artifact MCP result (typed content blocks);
@@ -815,6 +867,91 @@ function looksLikePdf(bytes: Buffer): boolean {
   // %PDF-
   return bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 &&
     bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+}
+
+const ListedArtifactSchema = z.object({
+  identifier: z.string().min(1),
+  title: z.string().nullish(),
+  artifact_type: z.string().nullish(),
+  mime_type: z.string().nullish(),
+  content_type: z.string().nullish(),
+  artifact_id: z.string().min(1).optional(),
+  version: z.number().int().nonnegative().nullish(),
+  artifact_reference: z.object({
+    artifact_id: z.string().min(1),
+    version: z.number().int().nonnegative().nullish(),
+  }).optional(),
+  metadata: z.object({
+    file: z.object({
+      content_type: z.string().optional(),
+      file_name: z.string().optional(),
+    }).passthrough().optional(),
+  }).passthrough().optional(),
+}).passthrough();
+
+type ListedArtifact = z.infer<typeof ListedArtifactSchema>;
+
+interface InvoicePdfCandidate {
+  identifier: string;
+  title: string | null;
+  artifactType: string | null;
+  artifactId: string;
+  version: number | null;
+  rank: number;
+}
+
+function parseListedArtifacts(value: unknown): ListedArtifact[] {
+  const out: ListedArtifact[] = [];
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 5 || node == null) return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, depth + 1);
+      return;
+    }
+    if (typeof node !== "object") return;
+    const parsed = ListedArtifactSchema.safeParse(node);
+    if (parsed.success && (parsed.data.artifact_reference?.artifact_id || parsed.data.artifact_id)) {
+      out.push(parsed.data);
+    }
+    const obj = node as Record<string, unknown>;
+    for (const key of ["artifacts", "items", "results", "data", "structuredContent"]) {
+      if (key in obj) visit(obj[key], depth + 1);
+    }
+  };
+  visit(value, 0);
+  return out;
+}
+
+function rankInvoicePdfCandidates(listed: ListedArtifact[]): InvoicePdfCandidate[] {
+  const ranked: InvoicePdfCandidate[] = [];
+  const seen = new Set<string>();
+  for (const entry of listed) {
+    const artifactId = entry.artifact_reference?.artifact_id ?? entry.artifact_id;
+    if (!artifactId || seen.has(artifactId)) continue;
+    const type = (entry.artifact_type ?? "").toLowerCase();
+    if (NON_ATTACHABLE_ARTIFACT_TYPES.has(type)) continue;
+    const mime = (
+      entry.mime_type ?? entry.content_type ?? entry.metadata?.file?.content_type ?? ""
+    ).split(";")[0]!.trim().toLowerCase();
+    const name = `${entry.identifier} ${entry.title ?? ""} ${entry.metadata?.file?.file_name ?? ""}`.toLowerCase();
+    let rank = 99;
+    if (mime === "application/pdf" || type === "pdf") rank = 0;
+    else if (name.endsWith(".pdf")) rank = 1;
+    else if (/invoice|sept[_-]inv\b/.test(name)) rank = 2;
+    else if (type === "file" || type === "document") rank = 3;
+    if (rank === 99) continue;
+    seen.add(artifactId);
+    ranked.push({
+      identifier: entry.identifier,
+      title: entry.title ?? null,
+      artifactType: entry.artifact_type ?? null,
+      artifactId,
+      version: entry.artifact_reference?.version ?? entry.version ?? null,
+      rank,
+    });
+  }
+  ranked.sort((a, b) => a.rank - b.rank);
+  return ranked;
 }
 
 /**

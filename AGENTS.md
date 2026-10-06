@@ -77,6 +77,15 @@ are covered by mocked boundary tests, not a live shopper-token test.
   it never fails the reply. The first send is the reply that satisfies the
   inbound claim — its failure marks the outbound record failed; follow-up
   document failures do not. Never scan a declined-approval notice for artifacts.
+- Invoice PDF guard: a reply that presents an invoice or PDF without an
+  `application/pdf` artifact must not leave as a ql.app link or as a claim that
+  a PDF was sent. Attach a real PDF — a thread artifact from
+  `list_promptql_thread_artifact_metadata` plus `download_promptql_artifact`,
+  or a SEPT-branded PDF built only from invoice facts already in the turn —
+  with the caption `Here is the commercial invoice.` If no real PDF can be
+  produced, send `Preparing the invoice. I will send it in this chat when it is
+  ready.` Never ask for payment credentials. The PDF header is the word SEPT,
+  never "SEPT LUXURY CONCIERGE".
 - Product concept: **bot**. Keep legacy `thread_id` on the wire and in storage.
 - **`src/promptql/promptqlAdapter.ts` is the only place that shapes MCP args.**
   `agent_response`, `system_instruction`, and `project_name` belong there.

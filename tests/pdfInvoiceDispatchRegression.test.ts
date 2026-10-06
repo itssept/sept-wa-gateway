@@ -79,7 +79,7 @@ test("regression gw-01: promptql file artifact <artifact type='file' identifier=
   expect(sentDoc.fileName).toBe("SEPT-INV-2026-8841.pdf");
   expect(sentDoc.mimeType).toBe("application/pdf");
   expect(sentDoc.bytes.toString()).toBe("%PDF-1.4 test invoice data");
-  expect(sentDoc.caption).toBe("Here is the commercial invoice for your deal.\nKindly let me know once reviewed.");
+  expect(sentDoc.caption).toBe("Here is the commercial invoice.");
   expect(sentDoc.caption).not.toContain("<artifact");
   expect(sentDoc.caption).not.toContain("https://ql.app/l/");
 
@@ -90,7 +90,7 @@ test("regression gw-01: promptql file artifact <artifact type='file' identifier=
   db.close();
 });
 
-test("regression gw-01: download failure produces 'failed to send' notice and never silently drops", async () => {
+test("regression gw-01: invoice download failure does not claim the PDF was sent", async () => {
   const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
   const chat = "operator@s.whatsapp.net";
   ctx.chatBots.upsert({ connectionId: "test-conn", chatJid: chat, shopperId: "s", threadId: "bot" });
@@ -147,10 +147,11 @@ test("regression gw-01: download failure produces 'failed to send' notice and ne
     threadId: "bot", threadEventId: null,
   });
 
-  expect(sentText).not.toBeNull();
-  expect(sentText).toContain("Here is your requested invoice.");
-  expect(sentText).toContain("(Attachment couldn't be retrieved)");
+  expect(sentText).toBe("Preparing the invoice. I will send it in this chat when it is ready.");
+  expect(sentText).not.toContain("Here is your requested invoice");
+  expect(sentText).not.toContain("couldn't be retrieved");
   expect(sentText).not.toContain("<artifact");
+  expect(sentText).not.toContain("ql.app");
 
   db.close();
 });
@@ -242,7 +243,7 @@ test("regression gw-01b: invoice json+markdown sidecars are NOT attached; PDF is
   expect(sentDocs.length).toBe(1);
   expect(sentDocs[0].mimeType).toBe("application/pdf");
   expect(sentDocs[0].fileName).toBe("SEPT-INV-2026-DINA.pdf");
-  expect(sentDocs[0].caption).toContain("Invoice ready for Dina.");
+  expect(sentDocs[0].caption).toBe("Here is the commercial invoice.");
   expect(sentDocs[0].caption).not.toContain("https://ql.app/l/");
   expect(sentText).toBeNull();
 
@@ -313,10 +314,10 @@ test("regression gw-01b: json+md only invoice artifacts never become WA document
   });
 
   expect(sentDoc).toBeNull();
-  expect(sentText).not.toBeNull();
-  expect(sentText).toContain("Here is the invoice as markdown");
+  expect(sentText).toBe("Preparing the invoice. I will send it in this chat when it is ready.");
+  expect(sentText).not.toContain("Here is the invoice as markdown");
   expect(sentText).not.toContain("https://ql.app/l/");
-  // No false "couldn't be retrieved" for intentional skips
+  expect(sentText).not.toContain("ql.app");
   expect(sentText).not.toContain("couldn't be retrieved");
 
   db.close();
@@ -385,15 +386,12 @@ test("invoice document captions are plain text and short", async () => {
 
   expect(sentDoc).not.toBeNull();
   expect(sentDoc!.fileName).toBe("SEPT-INV.pdf");
-  expect(sentDoc!.caption).toBeDefined();
+  expect(sentDoc!.caption).toBe("Here is the commercial invoice.");
   expect(sentDoc!.caption).not.toContain("###");
   expect(sentDoc!.caption).not.toContain("**");
   expect(sentDoc!.caption).not.toContain("`");
-  expect(sentDoc!.caption).toContain("Commercial invoice");
-  expect(sentDoc!.caption).toContain("Client: Noor");
   expect(sentDoc!.caption).not.toContain("Field 7");
-  const lines = sentDoc!.caption!.split("\n").filter((line) => line.trim().length > 0);
-  expect(lines.length).toBeLessThanOrEqual(4);
+  expect(sentDoc!.caption!.split("\n").filter((line) => line.trim().length > 0)).toHaveLength(1);
 
   db.close();
 });
