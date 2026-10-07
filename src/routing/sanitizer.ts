@@ -20,6 +20,8 @@
  *    - XML/platform tags (e.g. `<artifact .../>`, `<file_reference .../>`, `<user_mention .../>`, `<agent_mention/>`, `<cite>...</cite>`)
  *    - Markdown wiki links like `[Title](<wiki://...>)` -> cleaned to plain text `Title` or stripped
  *    - Platform/developer meta-language / footers
+ *    - Claims that the agent changed PromptQL approvals, background
+ *      permissions, or platform settings (it cannot)
  *    - WhatsApp does not render Markdown. Headers, emphasis markers, fenced
  *      blocks, and inline code spans are removed; the words stay.
  * 3. Legitimate client-facing URLs (e.g. `https://instagram.com/...`, `https://dhl.com/track/...`, `https://stripe.com/...`, `https://chanel.com/...`) MUST NOT be stripped.
@@ -29,6 +31,8 @@
  * Document captions are a separate, shorter cut of that plain text. The file
  * holds the invoice detail; the caption is the lead-in.
  */
+
+import { stripUnperformableAdminClaims } from "./outboundTruth.ts";
 
 /** Preferred length for a document caption. WhatsApp shows only a few lines under a file. */
 const DOCUMENT_CAPTION_MAX_CHARS = 320;
@@ -69,12 +73,13 @@ export function sanitizeOutboundText(text: string): string {
   // 1. Remove citations (<cite>...</cite>) completely since citations are internal metadata
   cleaned = cleaned.replace(/<cite>[\s\S]*?<\/cite>/gi, "");
 
-  // 2. Remove "Teach SEPT" markdown links and footers
-  // [Teach SEPT](...)
-  cleaned = cleaned.replace(/\[\s*(?:🧠\s*)?Teach\s+SEPT\s*\]\([^\)]*\)/gi, "");
-  // Plain or emoji Teach SEPT lines / phrases
-  cleaned = cleaned.replace(/(?:🧠\s*)?Teach\s+SEPT(?:\s*[-–—→>:]+\s*|\s+)(?:https?:\/\/[^\s\)]+|[^\n]+)?/gi, "");
-  cleaned = cleaned.replace(/(?:🧠\s*)?Teach\s+SEPT\b/gi, "");
+  // 2. Remove "Teach SEPT" markdown links and footers, including hyphenated
+  // "Teach-SEPT" and a whole teach-footer line. Zero-width chars are stripped
+  // first so they cannot hide the phrase.
+  cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  cleaned = cleaned.replace(/\[\s*(?:🧠\s*)?Teach[\s-]*SEPT\s*\]\([^\)]*\)/gi, "");
+  cleaned = cleaned.replace(/^[^\n]*\bteach(?:[\s-]*footer|[\s-]*sept)\b[^\n]*$/gim, "");
+  cleaned = cleaned.replace(/(?:🧠\s*)?Teach[\s-]*SEPT\b[^\n]*/gi, "");
 
   // 3. Internal hosts: ql.app, prompt.ql.app, data.prompt.ql.app, with or without a scheme.
   //    Markdown links to those hosts are removed entirely (the label is platform chrome).
@@ -134,6 +139,8 @@ export function sanitizeOutboundText(text: string): string {
   cleaned = filteredLines.join("\n");
   // Normalize 3+ newlines to 2 newlines
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  // False "I changed approvals / settings" claims never reach WhatsApp.
+  cleaned = stripUnperformableAdminClaims(cleaned);
 
   return cleaned;
 }

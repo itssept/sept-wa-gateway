@@ -39,12 +39,15 @@ import { documentCaption, isLifecycleOnlyOutbound, isPromptQlEnvelopeOutbound, o
 import { OPERATOR_WELCOME_BASE } from "../domain/welcomeMessage.ts";
 import {
   claimsInvoiceDelivery,
-  ensureInvoiceDelivery,
+  DOCUMENT_PDF_CAPTION,
+  DOCUMENT_PREPARING_TEXT,
+  ensureOutboundPdf,
   invoiceDocumentCaption,
   INVOICE_PREPARING_TEXT,
   isApplicationPdf,
   isHtmlArtifactSignal,
   isPdfishArtifactRef,
+  shouldEnforceDocumentPdf,
   shouldEnforceInvoicePdf,
 } from "./invoicePdfGuard.ts";
 
@@ -192,17 +195,22 @@ export class OutboundDispatcher {
     // not_attachable = intentional skip (json/md/html) — do not surface as a user failure note.
     let failures = outcomes.flatMap((o) => (o.ok || o.reason === "not_attachable" ? [] : [o.reason]));
 
-    // Invoice/PDF claims with no real PDF must not leave as a bare ql.app link
-    // or as a sentence that says the PDF was sent. An HTML chip on an invoice
-    // ask is the same failure. Recover a stored PDF, build one from facts
-    // already in the turn, or say we are still preparing it.
+    // Invoice and other PDF/document claims with no real PDF must not leave
+    // as a bare ql.app link, an HTML chip, or a sentence that says the file
+    // was sent. Invoices can be rebuilt from facts already in the turn.
+    // Lookbooks and other documents attach a stored non-invoice PDF or say
+    // they are still being prepared — the gateway does not invent one.
     let invoiceCaptionOnly = false;
+    let documentCaptionFallback = false;
     const reply = answer ?? "";
     const htmlSubstitute = replyHasHtmlSubstitute(reply, refs, responseArtifacts);
+    const pdfGuardInput = { reply, operatorText: input.operatorText, htmlSubstitute };
+    const enforceInvoice = shouldEnforceInvoicePdf(pdfGuardInput);
+    const enforceDocument = !enforceInvoice && shouldEnforceDocumentPdf(pdfGuardInput);
     if (
       completed &&
       !artifacts.some(isApplicationPdf) &&
-      shouldEnforceInvoicePdf({ reply, operatorText: input.operatorText, htmlSubstitute })
+      (enforceInvoice || enforceDocument)
     ) {
       const referencedPdf = refs.some((ref) => {
         const listed = responseArtifacts.find((a) => a.identifier === ref.identifier);
@@ -217,36 +225,48 @@ export class OutboundDispatcher {
         return true;
       });
       let recovered: ResolvedArtifact | null = null;
-      if (input.threadId && typeof this.adapter.recoverInvoicePdf === "function") {
+      const identity = { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" as const };
+      if (input.threadId) {
         try {
-          recovered = await this.adapter.recoverInvoicePdf(
-            { shopperId: input.shopperId, role: input.credentialRole ?? "shopper" },
-            input.threadId,
-            this.config.mcp.maxArtifactBytes,
-          );
+          if (enforceInvoice && typeof this.adapter.recoverInvoicePdf === "function") {
+            recovered = await this.adapter.recoverInvoicePdf(
+              identity,
+              input.threadId,
+              this.config.mcp.maxArtifactBytes,
+            );
+          } else if (enforceDocument && typeof this.adapter.recoverStoredPdf === "function") {
+            recovered = await this.adapter.recoverStoredPdf(
+              identity,
+              input.threadId,
+              this.config.mcp.maxArtifactBytes,
+              "document",
+            );
+          }
         } catch (err) {
-          log.warn("invoice pdf recovery failed", { err });
+          log.warn("pdf recovery failed", { err });
         }
       }
-      const decision = ensureInvoiceDelivery({
+      const decision = ensureOutboundPdf({
         reply,
         operatorText: input.operatorText,
         hasPdf: false,
         referencedPdf,
         recovered,
         maxBytes: this.config.mcp.maxArtifactBytes,
-        enforce: true,
+        enforceInvoice,
+        enforceDocument,
       });
       if (decision.kind === "attach") {
         artifacts = [decision.artifact];
         failures = [];
-        invoiceCaptionOnly = true;
-        log.info("invoice pdf guard", { source: decision.source });
+        invoiceCaptionOnly = enforceInvoice;
+        documentCaptionFallback = enforceDocument;
+        log.info("pdf guard", { source: decision.source, invoice: enforceInvoice });
       } else if (decision.kind === "preparing") {
         artifacts = [];
         failures = [];
         strippedAnswer = decision.text;
-        log.info("invoice pdf guard", { source: "preparing" });
+        log.info("pdf guard", { source: "preparing", invoice: enforceInvoice });
       }
     } else if (
       artifacts.some((artifact) =>
@@ -255,6 +275,8 @@ export class OutboundDispatcher {
       )
     ) {
       invoiceCaptionOnly = true;
+    } else if (artifacts.some(isApplicationPdf) && enforceDocument) {
+      documentCaptionFallback = true;
     }
 
     // Prepend welcome header if requested for first inbound DM with request
@@ -272,10 +294,11 @@ export class OutboundDispatcher {
     // document goes out, keep the caption short — the file holds the detail.
     const noted = withFailureNote(sanitizedText.trim(), failures);
     const [first, ...rest] = artifacts;
+    const shortCaption = documentCaption(noted, input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined);
     const caption = first
       ? (invoiceCaptionOnly
         ? invoiceDocumentCaption(input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined)
-        : documentCaption(noted, input.welcomePrefix ? OPERATOR_WELCOME_BASE : undefined))
+        : (shortCaption || (documentCaptionFallback ? DOCUMENT_PDF_CAPTION : shortCaption)))
       : noted;
     if (caption === "" && artifacts.length === 0) {
       // Nothing to say and nothing to attach — treat like an empty response.
@@ -283,7 +306,10 @@ export class OutboundDispatcher {
       return;
     }
 
-    if (artifacts.length === 0 && caption.trim() === INVOICE_PREPARING_TEXT) {
+    if (
+      artifacts.length === 0 &&
+      (caption.trim() === INVOICE_PREPARING_TEXT || caption.trim() === DOCUMENT_PREPARING_TEXT)
+    ) {
       const last = this.preparingSentAt.get(input.chatJid) ?? 0;
       const now = Date.now();
       if (now - last < OutboundDispatcher.PREPARING_DEDUPE_MS) {
@@ -476,8 +502,9 @@ export class OutboundDispatcher {
 }
 
 /**
- * Remove bare PromptQL permalinks (https://ql.app/l/...) that own a whole line,
- * while preserving "Teach SEPT -> https://ql.app/l/..." teaching links.
+ * Remove bare PromptQL permalinks (https://ql.app/l/...) that own a whole line.
+ * Teach SEPT footers are removed later by sanitizeOutboundText; they are not
+ * kept as a special case.
  */
 export function cleanArtifactPermalinks(text: string): string {
   const permalinkOnlyLine = /^[ \t]*https:\/\/ql\.app\/l\/[A-Za-z0-9]+[ \t]*$/gm;

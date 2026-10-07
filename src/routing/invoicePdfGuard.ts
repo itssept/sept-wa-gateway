@@ -1,19 +1,22 @@
 /**
- * Outbound invoice guard.
+ * Outbound PDF guard.
  *
  * A craft instruction can tell the model to run
  * deal_execution_flow.generate_invoice_pdf, and the model can still answer
  * with a ql.app permalink and no application/pdf artifact (live 2026-10-06,
- * INV-20332). This module decides what WhatsApp is allowed to send:
+ * INV-20332). The same leak happens for lookbooks and other documents
+ * (live 2026-10-07): a ql.app/l permalink plus a Teach SEPT footer instead
+ * of a file. This module decides what WhatsApp is allowed to send:
  *
  *   - a real PDF already on the turn stays attached
- *   - otherwise a stored thread PDF, or a SEPT-branded PDF built only from
- *     invoice facts already stated in the turn
- *   - otherwise one honest preparing line
+ *   - an invoice with no file uses a stored thread PDF, or a SEPT-branded
+ *     PDF built only from invoice facts already stated in the turn
+ *   - any other PDF/document claim uses a stored non-invoice PDF, or one
+ *     honest preparing line
  *
  * The caption on an invoice PDF is one plain sentence. The header is the
- * word SEPT. Nothing here asks for payment credentials or invents settlement
- * details.
+ * word SEPT. Nothing here asks for payment credentials, invents settlement
+ * details, or builds a lookbook from chat text.
  */
 
 import type { ResolvedArtifact } from "../promptql/promptqlAdapter.ts";
@@ -25,7 +28,15 @@ export const INVOICE_PDF_CAPTION = "Here is the commercial invoice.";
 export const INVOICE_PREPARING_TEXT =
   "Preparing the invoice. I will send it in this chat when it is ready.";
 
+export const DOCUMENT_PDF_CAPTION = "Here is the document.";
+
+export const DOCUMENT_PREPARING_TEXT =
+  "Preparing the document. I will send it in this chat when it is ready.";
+
 const INVOICE_WORD = /\b(?:invoices?|receipts?)\b/i;
+const DOCUMENT_WORD = /\b(?:pdfs?|lookbooks?|catalog(?:ue)?s?|brochures?|pitch\s+decks?)\b/i;
+const DOCUMENT_NOUN =
+  /\b(?:here(?:'s| is)|attached|attaching|enclosed|please find)\b[^.!\n]{0,80}\bdocuments?\b/i;
 const INVOICE_ID = /\b((?:SEPT-)?INV-\d{3,}(?:-[A-Z0-9]+)*)\b/i;
 const PDF_WORD = /\bpdfs?\b/i;
 const DELIVERY =
@@ -70,6 +81,34 @@ export function claimsInvoiceDelivery(text: string): boolean {
   return /\b(?:pdf\s+invoices?|invoices?\s+pdf)\b/i.test(visible);
 }
 
+/**
+ * True when the operator would see a non-invoice PDF or document being
+ * handed over (lookbook, catalogue, brochure, "here is the PDF"). Invoice
+ * claims stay on the invoice path.
+ */
+export function claimsDocumentDelivery(text: string): boolean {
+  if (claimsInvoiceDelivery(text)) return false;
+  const visible = sanitizeOutboundText(text);
+  if (DOCUMENT_NOUN.test(text) || DOCUMENT_NOUN.test(visible)) return true;
+  if (!DOCUMENT_WORD.test(text) && !DOCUMENT_WORD.test(visible)) return false;
+  if (DELIVERY.test(visible) || DELIVERY.test(text)) return true;
+  return /ql\.app\/l\//i.test(text);
+}
+
+/** A reply that is only a permalink and platform chrome, after sanitizing. */
+export function barePermalinkOnly(text: string): boolean {
+  if (!/ql\.app\/l\//i.test(text)) return false;
+  return sanitizeOutboundText(text).trim() === "";
+}
+
+const OPERATOR_DOCUMENT = /\b(?:pdfs?|lookbooks?|catalog(?:ue)?s?|brochures?|pitch\s+decks?)\b/i;
+
+/** True when the operator asked for a PDF or document that is not an invoice. */
+export function operatorRequestsDocument(text: string): boolean {
+  if (operatorRequestsInvoice(text)) return false;
+  return OPERATOR_DOCUMENT.test(text) || DOCUMENT_NOUN.test(text);
+}
+
 /** HTML chip, .html name, or an HTML document dumped into the reply. */
 export function isHtmlArtifactSignal(
   ref: { identifier: string; type?: string | null },
@@ -93,6 +132,26 @@ export function shouldEnforceInvoicePdf(input: {
 }): boolean {
   if (claimsInvoiceDelivery(input.reply)) return true;
   if (!operatorRequestsInvoice(input.operatorText ?? "")) return false;
+  if (input.htmlSubstitute) return true;
+  if (/ql\.app/i.test(input.reply)) return true;
+  if (/<!doctype\s+html|<\s*html\b/i.test(input.reply)) return true;
+  return false;
+}
+
+/**
+ * Run the document PDF guard for lookbooks and other non-invoice files.
+ * A clarifying reply with no permalink and no HTML chip is left alone.
+ * A reply that is only a ql.app link is not allowed to leave as that link.
+ */
+export function shouldEnforceDocumentPdf(input: {
+  reply: string;
+  operatorText?: string | null;
+  htmlSubstitute: boolean;
+}): boolean {
+  if (claimsInvoiceDelivery(input.reply)) return false;
+  if (claimsDocumentDelivery(input.reply)) return true;
+  if (barePermalinkOnly(input.reply)) return true;
+  if (!operatorRequestsDocument(input.operatorText ?? "")) return false;
   if (input.htmlSubstitute) return true;
   if (/ql\.app/i.test(input.reply)) return true;
   if (/<!doctype\s+html|<\s*html\b/i.test(input.reply)) return true;
@@ -186,6 +245,56 @@ export function invoiceDocumentCaption(preservedPrefix?: string): string {
   const prefix = preservedPrefix?.trim();
   if (!prefix) return INVOICE_PDF_CAPTION;
   return `${prefix}\n\n${INVOICE_PDF_CAPTION}`;
+}
+
+function invoiceNamedArtifact(artifact: { identifier: string; fileName: string; title: string }): boolean {
+  return /invoice|sept[_-]inv\b/i.test(`${artifact.identifier} ${artifact.fileName} ${artifact.title}`);
+}
+
+/**
+ * Invoice turns keep the invoice decision (stored PDF, facts PDF, or the
+ * invoice preparing line). Every other enforced document turn attaches a
+ * non-invoice PDF or says the document is still being prepared. A lookbook
+ * is never invented from chat text.
+ */
+export function ensureOutboundPdf(input: {
+  reply: string;
+  operatorText?: string | null;
+  hasPdf: boolean;
+  referencedPdf: boolean;
+  recovered: ResolvedArtifact | null;
+  maxBytes: number;
+  issuedOn?: Date;
+  enforceInvoice: boolean;
+  enforceDocument: boolean;
+}): InvoiceDeliveryDecision {
+  if (input.hasPdf) return { kind: "unchanged" };
+  if (!input.enforceInvoice && !input.enforceDocument) return { kind: "unchanged" };
+
+  const recovered = input.recovered;
+  const recoveredOk = Boolean(
+    recovered && isApplicationPdf(recovered) && recovered.bytes.length <= input.maxBytes,
+  );
+  const wrongInvoice = Boolean(
+    recoveredOk && recovered && input.enforceDocument && !input.enforceInvoice && invoiceNamedArtifact(recovered),
+  );
+  if (recoveredOk && recovered && !wrongInvoice) {
+    return { kind: "attach", source: "thread", artifact: recovered };
+  }
+
+  if (input.enforceInvoice) {
+    return ensureInvoiceDelivery({
+      reply: input.reply,
+      operatorText: input.operatorText,
+      hasPdf: false,
+      referencedPdf: input.referencedPdf,
+      recovered: null,
+      maxBytes: input.maxBytes,
+      issuedOn: input.issuedOn,
+      enforce: true,
+    });
+  }
+  return { kind: "preparing", text: DOCUMENT_PREPARING_TEXT };
 }
 
 /** Branded one-page invoice. Header is the word SEPT. Fields are the ones passed in. */

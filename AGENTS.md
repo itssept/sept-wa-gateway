@@ -79,17 +79,33 @@ are covered by mocked boundary tests, not a live shopper-token test.
   document failures do not. Never scan a declined-approval notice for artifacts.
 - Invoice PDF guard: a reply that presents an invoice or PDF without an
   `application/pdf` artifact must not leave as a ql.app link, an HTML chip, or
-  a claim that a PDF was sent. HTML bytes are not a WhatsApp document, even
+  a claim that a PDF was sent. The same rule covers lookbooks and other
+  documents: attach a real `application/pdf` or send `Preparing the document.
+  I will send it in this chat when it is ready.` A stored invoice PDF is not
+  reused as a lookbook. HTML bytes are not a WhatsApp document, even
   when the artifact is labeled `file` or `application/pdf`. Attach a real PDF —
   a thread artifact from `list_promptql_thread_artifact_metadata` plus
   `download_promptql_artifact`, or a SEPT-branded PDF built only from invoice
   facts already in the turn — with the caption `Here is the commercial
-  invoice.` If no real PDF can be produced, send `Preparing the invoice. I
+  invoice.` If no real invoice PDF can be produced, send `Preparing the invoice. I
   will send it in this chat when it is ready.` Never ask for payment
   credentials. The PDF header is the word SEPT, never "SEPT LUXURY CONCIERGE".
+  Strip Teach SEPT / teach-footer chrome from captions and body text.
   Invoice asks (including a photo plus "invoice this") also append a
   turn-scoped `generate_invoice_pdf` / `application/pdf` contract onto
   `system_instruction`. Shopper text itself is not wrapped.
+- Voice notes are transcribed on the gateway before `ask_promptql`. Do not
+  upload the audio file — that is what makes the agent call the approval-gated
+  transcription tool, which operators cannot approve by typing in WhatsApp.
+  `GATEWAY_VOICE_STT_URL` is an optional OpenAI-compatible speech endpoint.
+  When no transcript is available, a voice-only shopper or PA turn is
+  `force_skip` plus one honest WhatsApp line, not a responding run. The
+  turn's `system_instruction` forbids external speech APIs, approval
+  prompts, and claims that approvals or platform settings were changed.
+- Outbound text drops sentences that claim the agent changed PromptQL
+  approvals, background permissions, or platform settings. Negated lines
+  ("was not auto-approved", "cannot change approval settings") and ordinary
+  "for your approval" copy still send.
 - Bare re-tags while a run is in flight (`@SEPT`, `?`, `pls`, no new text and
   no photo) are `force_skip` context, not a new `force_respond`. A photo
   album (10–34 images, with or without a trailing caption such as "Please

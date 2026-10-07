@@ -129,6 +129,10 @@ rollout.
 | `PROMPTQL_MCP_MAX_RETRIES` | `3` | Bounded transient-retry count. |
 | `PROMPTQL_RESPONSE_MAX_MS` | `180000` | Overall ceiling for the ask → blocking-response flow. |
 | `PROMPTQL_MAX_ARTIFACT_BYTES` | `16777216` | Per-artifact decoded-size cap for artifacts sent to WhatsApp as documents (with the reply text as the first document's caption), max 16 MiB. Larger artifacts are skipped (audited) with a short bracket note in the reply, not truncated. |
+| `GATEWAY_VOICE_STT_URL` | empty | OpenAI-compatible speech endpoint (`POST` multipart `file` + `model`, JSON `{ text }`). Voice notes are transcribed here and the audio is not uploaded to PromptQL. Empty still withholds the audio; a voice-only turn then gets one honest line in the chat instead of an approval-gated transcription tool. |
+| `GATEWAY_VOICE_STT_API_KEY` | empty | Bearer token for `GATEWAY_VOICE_STT_URL`. Never logged. |
+| `GATEWAY_VOICE_STT_MODEL` | `whisper-1` | `model` field on the speech request. |
+| `GATEWAY_VOICE_STT_TIMEOUT_MS` | `20000` | Speech request timeout, max 60000. |
 
 ### Never set in env
 

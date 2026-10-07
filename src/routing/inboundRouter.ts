@@ -27,6 +27,13 @@ import { formatClientEnvelope } from "../promptql/clientEnvelope.ts";
 import { phoneE164FromJid, maskJid, nowIso } from "../util.ts";
 import { isPureGreeting, OPERATOR_WELCOME_PROMPT } from "../domain/welcomeMessage.ts";
 import { withInvoiceTurnContract } from "../craft/orgCraft.ts";
+import {
+  groundVoiceTurn,
+  VOICE_UNAVAILABLE_NOTICE,
+  withVoiceTurnContract,
+  type VoiceGroundingMessage,
+  type VoiceTranscriber,
+} from "./voiceTranscript.ts";
 
 export interface RoutingDeps {
   settings: GatewaySettingsRepo;
@@ -62,6 +69,12 @@ export interface RoutingDeps {
    * instead of killing the answer. 0 disables the wait.
    */
   inFlightWaitMs?: number;
+  /**
+   * Gateway speech-to-text. Audio is never uploaded to PromptQL. When this
+   * is omitted, voice notes are still withheld and a voice-only turn is
+   * answered with an honest line instead of an approval-gated tool call.
+   */
+  voiceTranscriber?: VoiceTranscriber;
 }
 
 /** Shown on a relayed message once the agent is asked to respond (force_respond),
@@ -385,16 +398,17 @@ export class InboundRouter {
     dest: Destination, identity: PostingIdentity, query: string,
     agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[],
     rememberFailure: boolean, messageId: string | undefined, log: Logger,
+    voiceTurn = false,
   ): Promise<AskResult> {
     const oversized = files.length > 1 && promptQlUploadRawBytes(files) > MULTI_FILE_UPLOAD_BUDGET_BYTES;
     if (oversized) {
       log.warn("splitting media upload to stay within PromptQL request budget", {
         fileCount: files.length, totalBytes: promptQlUploadRawBytes(files),
       });
-      return this.submitFilesOneByOne(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
+      return this.submitFilesOneByOne(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId, voiceTurn);
     }
     try {
-      return await this.submit(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId);
+      return await this.submit(msg, dest, identity, query, agentResponse, files, rememberFailure, messageId, voiceTurn);
     } catch (err) {
       if (!(err instanceof AskSubmissionError) || err.status !== "upload_failed" || files.length === 0) {
         throw err;
@@ -404,7 +418,7 @@ export class InboundRouter {
         // payload, then the operator only got a resend notice.
         log.warn("ask upload_failed; uploading each file on its own", { fileCount: files.length });
         const ask = await this.submitFilesOneByOne(
-          msg, dest, identity, query, agentResponse, files, rememberFailure, messageId,
+          msg, dest, identity, query, agentResponse, files, rememberFailure, messageId, voiceTurn,
         );
         this.chatBots.setPendingPost(msg.connectionId, msg.chatJid, null);
         return ask;
@@ -420,6 +434,7 @@ export class InboundRouter {
     dest: Destination, identity: PostingIdentity, query: string,
     agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[],
     rememberFailure: boolean, messageId: string | undefined,
+    voiceTurn = false,
   ): Promise<AskResult> {
     let ask!: AskResult;
     for (let i = 0; i < files.length; i++) {
@@ -433,6 +448,7 @@ export class InboundRouter {
           [file],
           last && rememberFailure,
           messageId,
+          last && voiceTurn,
         );
       } catch (err) {
         if (!last && rememberFailure) {
@@ -449,14 +465,17 @@ export class InboundRouter {
     msg: Pick<InboundMessage, "connectionId" | "chatJid" | "isGroup">,
     dest: Destination, identity: PostingIdentity, query: string,
     agentResponse: "force_skip" | "force_respond", files: PromptQlFileInput[] = [],
-    rememberFailure = true, messageId?: string,
+    rememberFailure = true, messageId?: string, voiceTurn = false,
   ): Promise<AskResult> {
     const existing = this.chatBots.get(msg.connectionId, msg.chatJid);
     // Never continue the common bot using a newly registered shopper's
     // destination. Keep the old mapping until MCP returns a new handle.
     const promoting = existing?.shopperId === null && dest.ownerId !== null;
     try {
-      const systemInstruction = withInvoiceTurnContract(this.deps.orgCraftSystemInstruction, query);
+      const systemInstruction = withVoiceTurnContract(
+        withInvoiceTurnContract(this.deps.orgCraftSystemInstruction, query),
+        voiceTurn,
+      );
       const ask = await this.adapter.ask(identity, {
         query, threadId: promoting ? null : existing?.threadId ?? null,
         roomName: !existing || promoting ? dest.roomName : null, agentResponse, files,
@@ -644,10 +663,23 @@ export class InboundRouter {
       // Normalize mime/filename before the first ask (strip ;params, sniff magic).
       for (let i = 0; i < files.length; i++) files[i] = normalizePromptQlFile(files[i]!);
 
+      // Voice notes are text before ask_promptql. The audio file is what makes
+      // PromptQL call the approval-gated transcription tool (2026-10-07).
+      const grounded = await this.groundBatch(validMessages, files, rawQuery, log);
+      rawQuery = grounded.query;
+      files.splice(0, files.length, ...grounded.files);
+      const voiceTurn = grounded.voice;
+      const voiceHold = voiceTurn && !grounded.transcriptReady && grounded.voiceOnly
+        && (shopperTrigger || paTrigger) && !retagOnly;
+      if (voiceHold) {
+        agentResponse = "force_skip";
+        log.info("voice note held; transcript unavailable");
+      }
+
       let ask: AskResult;
       try {
         ask = await this.submitMediaAsk(
-          firstMsg, dest, identity, rawQuery, agentResponse, files, log,
+          firstMsg, dest, identity, rawQuery, agentResponse, files, log, voiceTurn,
         );
         for (const m of validMessages) {
           this.deps.messages.markRelayed(m.connectionId, m.chatJid, m.messageId);
@@ -659,10 +691,31 @@ export class InboundRouter {
         files.length = 0;
       }
 
+      if (voiceHold) {
+        // The chat already asked us. Say we could not transcribe, and do not
+        // start a PromptQL run that would request an approval.
+        try {
+          await this.dispatcher.notifyChat({
+            connectionId: firstMsg.connectionId,
+            chatJid: firstMsg.chatJid,
+            text: VOICE_UNAVAILABLE_NOTICE,
+          });
+        } catch (err) {
+          log.warn("voice transcript notice failed", { err });
+        }
+        for (const { msg, token } of claimedTokens) {
+          this.outboundLog.markRelayed(msg.connectionId, msg.messageId, token, msg.chatJid);
+        }
+        return;
+      }
+
       let responseIdentity = identity;
       if (paTrigger && !retagOnly && this.available(firstMsg, epoch)) {
         responseIdentity = { role: "pa", shopperId: dest.owner!.id };
-        ask = await this.submit(firstMsg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond");
+        ask = await this.submit(
+          firstMsg, dest, responseIdentity, paPrompt(dest.owner!.name), "force_respond",
+          [], true, undefined, voiceTurn,
+        );
       }
 
       if (retagOnly || (!shopperTrigger && !paTrigger && !isGreetingFirstDM) || !this.available(firstMsg, epoch)) {
@@ -794,8 +847,12 @@ export class InboundRouter {
               : [];
             const query = identity.role === "client" ? clientQuery(replay) : promptQlQuery(replay);
             if (!query) continue;
+            const grounded = await this.groundBatch([replay], files.map((file) => normalizePromptQlFile(file)), query, this.log);
             // Failed history stays in the history repository, not the live retry slot.
-            await this.submitTurn(msg, dest, identity, query, "force_skip", files, false, replay.messageId, this.log);
+            // History never sends a WhatsApp reply. Audio still stays off the ask.
+            await this.submitTurn(
+              msg, dest, identity, grounded.query, "force_skip", grounded.files, false, replay.messageId, this.log, grounded.voice,
+            );
             this.deps.messages.markRelayed(row.connectionId, row.chatJid, row.messageId);
           } catch {
             this.log.warn("history row relay failed", { corrId: row.messageId, chatJid: maskJid(row.chatJid) });
@@ -809,6 +866,22 @@ export class InboundRouter {
       }
     });
   }
+  private groundBatch(
+    messages: VoiceGroundingMessage[],
+    files: PromptQlFileInput[],
+    query: string,
+    log: Logger,
+  ) {
+    const transcriber = this.deps.voiceTranscriber;
+    return groundVoiceTurn({
+      messages,
+      files,
+      query,
+      log,
+      transcribe: (request) => transcriber ? transcriber.transcribe(request) : Promise.resolve(null),
+    });
+  }
+
   /**
    * Submit an ask that may carry media. Live PromptQL MCP staging returns
    * upload_failed for WhatsApp JPEGs (2026-09-28 Dior, 2026-09-29 Chanel,
@@ -829,6 +902,7 @@ export class InboundRouter {
     agentResponse: "force_skip" | "force_respond",
     files: PromptQlFileInput[],
     log: Logger,
+    voiceTurn = false,
   ): Promise<AskResult> {
     const hadReadyMedia = files.length > 0;
     const staged = stagePromptQlFiles(files, STAGED_UPLOAD_BUDGET_BYTES);
@@ -842,7 +916,7 @@ export class InboundRouter {
       // still over budget. Single-file upload_failed is rethrown so this
       // ladder owns the backoff and the smaller re-encode.
       return this.submitTurn(
-        firstMsg, dest, identity, rawQuery, agentResponse, payload, true, firstMsg.messageId, log,
+        firstMsg, dest, identity, rawQuery, agentResponse, payload, true, firstMsg.messageId, log, voiceTurn,
       );
     };
 

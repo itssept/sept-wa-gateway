@@ -676,11 +676,26 @@ export class PromptQlAdapter {
     threadId: string,
     maxBytes: number,
   ): Promise<ResolvedArtifact | null> {
+    return this.recoverStoredPdf(shopperId, threadId, maxBytes, "invoice");
+  }
+
+  /**
+   * Download one stored PDF for a reply that linked a file instead of
+   * attaching it. Invoice mode keeps the historical ranking (any real PDF,
+   * then invoice-named files). Document mode skips invoice-named files so a
+   * lookbook turn cannot be sent an old commercial invoice.
+   */
+  async recoverStoredPdf(
+    shopperId: IdentityInput,
+    threadId: string,
+    maxBytes: number,
+    mode: "invoice" | "document" = "invoice",
+  ): Promise<ResolvedArtifact | null> {
     if (!threadId.trim()) return null;
     try {
       const session = this.session(shopperId);
       const listed = await session.callTool(TOOL_LIST_ARTIFACTS, { thread_id: threadId });
-      const candidates = rankInvoicePdfCandidates(parseListedArtifacts(listed.structured ?? listed.raw))
+      const candidates = rankStoredPdfCandidates(parseListedArtifacts(listed.structured ?? listed.raw), mode)
         .slice(0, 4);
       for (const candidate of candidates) {
         const args: Record<string, unknown> = { artifact_id: candidate.artifactId };
@@ -703,14 +718,14 @@ export class PromptQlAdapter {
           );
           if ("artifact" in decoded && looksLikePdf(decoded.artifact.bytes)) return decoded.artifact;
         } catch (err) {
-          this.log.warn("invoice pdf candidate skipped", {
+          this.log.warn("stored pdf candidate skipped", {
             identifier: maskArtifact(candidate.identifier),
             err,
           });
         }
       }
     } catch (err) {
-      this.log.warn("invoice pdf listing failed", { err });
+      this.log.warn("stored pdf listing failed", { err });
     }
     return null;
   }
@@ -938,7 +953,18 @@ function parseListedArtifacts(value: unknown): ListedArtifact[] {
   return out;
 }
 
-function rankInvoicePdfCandidates(listed: ListedArtifact[]): InvoicePdfCandidate[] {
+function isInvoiceListingName(name: string): boolean {
+  return /invoice|sept[_-]inv\b/.test(name);
+}
+
+/**
+ * Order stored files for PDF recovery. Document mode drops invoice-named
+ * rows so a lookbook reply is not filled with a commercial invoice.
+ */
+export function rankStoredPdfCandidates(
+  listed: ListedArtifact[],
+  mode: "invoice" | "document" = "invoice",
+): InvoicePdfCandidate[] {
   const ranked: InvoicePdfCandidate[] = [];
   const seen = new Set<string>();
   for (const entry of listed) {
@@ -950,10 +976,11 @@ function rankInvoicePdfCandidates(listed: ListedArtifact[]): InvoicePdfCandidate
       entry.mime_type ?? entry.content_type ?? entry.metadata?.file?.content_type ?? ""
     ).split(";")[0]!.trim().toLowerCase();
     const name = `${entry.identifier} ${entry.title ?? ""} ${entry.metadata?.file?.file_name ?? ""}`.toLowerCase();
+    if (mode === "document" && isInvoiceListingName(name)) continue;
     let rank = 99;
     if (mime === "application/pdf" || type === "pdf") rank = 0;
-    else if (name.endsWith(".pdf")) rank = 1;
-    else if (/invoice|sept[_-]inv\b/.test(name)) rank = 2;
+    else if (name.endsWith(".pdf") || (mode === "document" && /lookbook|catalog|brochure|deck/.test(name))) rank = 1;
+    else if (mode === "invoice" && isInvoiceListingName(name)) rank = 2;
     else if (type === "file" || type === "document") rank = 3;
     if (rank === 99) continue;
     seen.add(artifactId);
@@ -970,6 +997,14 @@ function rankInvoicePdfCandidates(listed: ListedArtifact[]): InvoicePdfCandidate
   return ranked;
 }
 
+/** Identifiers in recovery order. Used by tests and recoverStoredPdf. */
+export function orderStoredPdfIdentifiers(
+  value: unknown,
+  mode: "invoice" | "document" = "invoice",
+): string[] {
+  return rankStoredPdfCandidates(parseListedArtifacts(value), mode).map((candidate) => candidate.identifier);
+}
+
 /**
  * Select response artifacts that should be considered for native WA document
  * dispatch when PromptQL has replaced inline <artifact/> tags with permalinks.
@@ -984,7 +1019,11 @@ export function selectDocumentArtifactRefs(artifacts: ResponseArtifact[]): Artif
     if (t === "file" || t === "pdf" || t === "document") return true;
     if (t === "png" || t === "jpeg" || t === "jpg" || t === "image" || t === "visualization") return true;
     // Identifier hint only when type is missing/unknown — never for json/md.
-    if (!t && isInvoiceArtifactRef(a.identifier, a.title)) return true;
+    // A lookbook PDF with no artifact_type must still be downloaded.
+    if (!t && (
+      isInvoiceArtifactRef(a.identifier, a.title)
+      || /\.pdf\b|lookbook|catalog(?:ue)?|brochure/i.test(`${a.identifier} ${a.title ?? ""}`)
+    )) return true;
     return false;
   });
 
