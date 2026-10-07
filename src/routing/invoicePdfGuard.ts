@@ -19,7 +19,7 @@
  * details, or builds a lookbook from chat text.
  */
 
-import type { ResolvedArtifact } from "../promptql/promptqlAdapter.ts";
+import { pdfPayload, type ResolvedArtifact } from "../promptql/promptqlAdapter.ts";
 import { operatorRequestsInvoice } from "../craft/orgCraft.ts";
 import { sanitizeOutboundText } from "./sanitizer.ts";
 
@@ -164,7 +164,23 @@ export function isApplicationPdf(artifact: { mimeType: string; bytes: Buffer }):
 }
 
 export function isPdfBuffer(bytes: Buffer): boolean {
-  return bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-";
+  // BOM and leading whitespace still count. WhatsApp is sent the sliced payload.
+  return pdfPayload(bytes) != null;
+}
+
+/** Bytes, mime, and filename WhatsApp will accept as a PDF document.
+ *  A charset parameter or an `.html` title is how a real PDF was dropped. */
+export function whatsAppPdfDocument(artifact: {
+  bytes: Buffer;
+  fileName: string;
+  mimeType: string;
+}): { bytes: Buffer; fileName: string; mimeType: string } | null {
+  const mime = artifact.mimeType.split(";")[0]!.trim().toLowerCase();
+  const payload = pdfPayload(artifact.bytes, mime === "application/pdf" || mime === "application/octet-stream");
+  if (!payload) return null;
+  let fileName = (artifact.fileName.trim() || "document").replace(/\.(html?|json|md|txt|csv)$/i, "");
+  if (!fileName.toLowerCase().endsWith(".pdf")) fileName = `${fileName}.pdf`;
+  return { bytes: Buffer.from(payload), fileName, mimeType: "application/pdf" };
 }
 
 /** A referenced file/pdf/invoice artifact that we already tried to download. */
@@ -212,6 +228,8 @@ export function extractInvoiceFacts(text: string): InvoiceFacts | null {
 export function ensureInvoiceDelivery(input: {
   reply: string;
   operatorText?: string | null;
+  /** Plain text taken from a dropped invoice chip. Never logged. */
+  supplementalText?: string | null;
   hasPdf: boolean;
   referencedPdf: boolean;
   recovered: ResolvedArtifact | null;
@@ -230,7 +248,9 @@ export function ensureInvoiceDelivery(input: {
   // A download of an official file/pdf reference failed. Do not replace it
   // with a PDF parsed out of chat — say we are still preparing it.
   if (!input.referencedPdf) {
-    const facts = extractInvoiceFacts(`${input.operatorText ?? ""}\n${input.reply}`);
+    const facts = extractInvoiceFacts(
+      `${input.operatorText ?? ""}\n${input.reply}\n${input.supplementalText ?? ""}`,
+    );
     if (facts) {
       const built = buildSeptInvoicePdf(facts, input.issuedOn);
       if (built.bytes.length <= input.maxBytes && isApplicationPdf(built)) {
@@ -260,6 +280,7 @@ function invoiceNamedArtifact(artifact: { identifier: string; fileName: string; 
 export function ensureOutboundPdf(input: {
   reply: string;
   operatorText?: string | null;
+  supplementalText?: string | null;
   hasPdf: boolean;
   referencedPdf: boolean;
   recovered: ResolvedArtifact | null;
@@ -286,6 +307,7 @@ export function ensureOutboundPdf(input: {
     return ensureInvoiceDelivery({
       reply: input.reply,
       operatorText: input.operatorText,
+      supplementalText: input.supplementalText,
       hasPdf: false,
       referencedPdf: input.referencedPdf,
       recovered: null,
