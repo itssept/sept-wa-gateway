@@ -49,6 +49,18 @@ test("selectDocumentArtifactRefs drops an HTML invoice chip even when the name s
   expect(refs).toEqual([]);
 });
 
+test("selectDocumentArtifactRefs keeps an untyped lookbook pdf", () => {
+  const refs = selectDocumentArtifactRefs([
+    {
+      identifier: "lookbook_fw26",
+      title: "FW26 Lookbook.pdf",
+      artifact_type: null,
+      artifact_reference: { artifact_id: "lb", version: 0 },
+    },
+  ]);
+  expect(refs).toEqual([{ identifier: "lookbook_fw26", type: "file" }]);
+});
+
 test("looksLikeHtmlBytes rejects an HTML chip labeled as a pdf", () => {
   expect(looksLikeHtmlBytes(Buffer.from("<!DOCTYPE html><html><body>Invoice</body></html>"))).toBe(true);
   expect(looksLikeHtmlBytes(Buffer.from("  <html><body>chip</body></html>"))).toBe(true);

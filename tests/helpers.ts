@@ -40,6 +40,11 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     orgCraftFile: undefined,
     orgCraftSystemInstruction: undefined,
     publicBaseUrl: "",
+    voiceStt: {
+      url: "",
+      model: "whisper-1",
+      timeoutMs: 20_000,
+    },
     mcp: {
       endpoint: "https://example.test/mcp",
       authScheme: "pat",

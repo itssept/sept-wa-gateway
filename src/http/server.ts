@@ -11,6 +11,7 @@ import { createContext } from "../context.ts";
 import { WhatsAppConnection } from "../whatsapp/socket.ts";
 import { AntiBanQueue } from "../whatsapp/antiBan.ts";
 import { InboundRouter } from "../routing/inboundRouter.ts";
+import { createVoiceTranscriber } from "../routing/voiceTranscript.ts";
 import { loadOrgCraftSystemInstruction } from "../craft/orgCraft.ts";
 import { OutboundDispatcher } from "../routing/outboundDispatcher.ts";
 import { makeHandler } from "./adminApi.ts";
@@ -118,6 +119,13 @@ async function main(): Promise<void> {
       orgCraftSystemInstruction,
       ephemeralMedia,
       publicBaseUrl: config.publicBaseUrl,
+      voiceTranscriber: createVoiceTranscriber({
+        url: config.voiceStt.url,
+        apiKey: config.voiceStt.apiKey,
+        model: config.voiceStt.model,
+        timeoutMs: config.voiceStt.timeoutMs,
+        log: ctx.log.child({ component: "voice-stt" }),
+      }),
     },
   );
 

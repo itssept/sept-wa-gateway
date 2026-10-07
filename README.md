@@ -55,11 +55,16 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   caption>`. The phone line is `[Phone] <E.164>` when a real number is known,
   or `[ID] <lid>` when only the opaque WhatsApp id is; with neither, it stays a
   blank `[Phone]` line. The name is left blank when unavailable.
-- Image, video, audio, document and sticker files are downloaded transiently
+- Image, video, document and sticker files are downloaded transiently
   in DMs and groups, attached through `ask_promptql.files`, then released.
-  Original document names and voice-note labels are preserved. Contact cards
-  and locations get labels only, not converted attachments. Failed downloads
-  still relay the caption or media kind. Bytes are never persisted.
+  Original document names are preserved. Voice notes are transcribed on the
+  gateway before the ask (`GATEWAY_VOICE_STT_URL`, OpenAI-compatible
+  multipart speech endpoint). The audio bytes are not uploaded, so PromptQL
+  is not asked to call an approval-gated transcription tool. If a voice-only
+  turn cannot be transcribed, the gateway says so in the chat and does not
+  start that run. Contact cards and locations get labels only, not converted
+  attachments. Failed downloads still relay the caption or media kind. Bytes
+  are never persisted.
 - The raw-media limit is 7 MiB; the complete MCP request is capped at 10 MiB.
   A partial MCP failure preserves any returned bot handle. Its text is retained
   encrypted and retried without media or a bot run on the next message.
@@ -75,7 +80,11 @@ WhatsApp  ◄──  AntiBan queue  ◄── OutboundDispatcher ◄────
   (16 MiB). An oversized or unfetchable artifact is skipped and audited, and a
   short note is appended to the reply in brackets, e.g.
   `(Attachment too large to send)` or `(Attachment couldn't be retrieved)`. The
-  text reply is always delivered regardless.
+  text reply is always delivered regardless. A reply that presents a PDF or
+  other document (invoice, lookbook, catalogue) goes out as a real
+  `application/pdf` or as one preparing line — never as a `ql.app` permalink
+  or a Teach SEPT footer. Sentences that claim the agent changed PromptQL
+  approvals or platform settings are dropped.
 - Every `/api/v1/*` endpoint requires `GATEWAY_ADMIN_TOKEN`, except
   `GET` and `HEAD /api/v1/ephemeral-media/:token` (short-lived multi-fetch bridge when PromptQL
   `files[]` staging returns `upload_failed`). Set `GATEWAY_PUBLIC_BASE_URL` to

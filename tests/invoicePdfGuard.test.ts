@@ -2,9 +2,12 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { OutboundDispatcher } from "../src/routing/outboundDispatcher.ts";
 import {
+  DOCUMENT_PDF_CAPTION,
+  DOCUMENT_PREPARING_TEXT,
   INVOICE_PDF_CAPTION,
   INVOICE_PREPARING_TEXT,
   buildSeptInvoicePdf,
+  claimsDocumentDelivery,
   claimsInvoiceDelivery,
   extractInvoiceFacts,
 } from "../src/routing/invoicePdfGuard.ts";
@@ -20,6 +23,11 @@ test("invoice delivery claims are specific", () => {
   expect(claimsInvoiceDelivery("What invoice number did we use for the Kelly?")).toBe(false);
   expect(claimsInvoiceDelivery("The Kelly 28 is available in gold.")).toBe(false);
   expect(claimsInvoiceDelivery("Here is the catalogue PDF.")).toBe(false);
+  expect(claimsDocumentDelivery("Here is the catalogue PDF.")).toBe(true);
+  expect(claimsDocumentDelivery("Here is the lookbook.\nhttps://ql.app/l/AbCdEf12")).toBe(true);
+  expect(claimsDocumentDelivery("The lookbook will be ready tomorrow.")).toBe(false);
+  expect(claimsDocumentDelivery("The Kelly 28 is available in gold.")).toBe(false);
+  expect(claimsDocumentDelivery(LIVE_REPLY)).toBe(false);
   expect(claimsInvoiceDelivery(
     "Invoice is ready for Noor.\n\n⚠️ SEPT's run was cancelled before it could finish.\nhttps://ql.app/l/AbCdEf12\n\nTotal $5,000.",
   )).toBe(false);
@@ -65,6 +73,7 @@ function dispatchHarness(
     artifacts?: unknown[];
     resolve?: (refs: unknown[]) => unknown[];
     recover?: () => Promise<{ bytes: Buffer; fileName: string; mimeType: string; identifier: string; title: string } | null>;
+    recoverStored?: () => Promise<{ bytes: Buffer; fileName: string; mimeType: string; identifier: string; title: string } | null>;
     operatorText?: string;
   },
 ) {
@@ -81,6 +90,7 @@ function dispatchHarness(
       return extras.resolve(refs);
     },
     ...(extras?.recover ? { recoverInvoicePdf: async () => extras.recover!() } : {}),
+    ...(extras?.recoverStored ? { recoverStoredPdf: async () => extras.recoverStored!() } : {}),
   };
   const dispatcher = new OutboundDispatcher(
     adapter as never,
@@ -321,6 +331,128 @@ test("non-invoice messages are unchanged", async () => {
   await claimAndDispatch(ctx, second.dispatcher, "status-2");
   expect(second.sent.text).toBe(question);
   expect(second.sent.doc).toBeUndefined();
+  db.close();
+});
+
+const LOOKBOOK_REPLY = "Here is the lookbook.\nhttps://ql.app/l/AbCdEf12\n\n🧠 Teach SEPT → https://ql.app/l/i44VehWS";
+
+test("lookbook permalink with a Teach SEPT footer does not leave as a link", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, sent } = dispatchHarness(ctx, LOOKBOOK_REPLY);
+  await claimAndDispatch(ctx, dispatcher, "lookbook-preparing");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(DOCUMENT_PREPARING_TEXT);
+  expect(sent.text).not.toContain("ql.app");
+  expect(sent.text).not.toContain("Teach SEPT");
+  expect(sent.text).not.toContain("Teach");
+  db.close();
+});
+
+test("a bare permalink and Teach SEPT footer becomes the preparing line", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, sent } = dispatchHarness(
+    ctx,
+    "https://ql.app/l/AbCdEf12\n🧠 Teach-SEPT → https://ql.app/l/i44VehWS",
+  );
+  await claimAndDispatch(ctx, dispatcher, "bare-permalink");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(DOCUMENT_PREPARING_TEXT);
+  expect(sent.text).not.toContain("ql.app");
+  expect(sent.text?.toLowerCase()).not.toContain("teach");
+  db.close();
+});
+
+test("a stored lookbook PDF is attached and the caption has no permalink or teach footer", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const stored = Buffer.from("%PDF-1.4 lookbook-bytes");
+  const { dispatcher, sent } = dispatchHarness(ctx, LOOKBOOK_REPLY, {
+    recoverStored: async () => ({
+      identifier: "fw26_lookbook",
+      title: "FW26 Lookbook.pdf",
+      fileName: "FW26 Lookbook.pdf",
+      mimeType: "application/pdf",
+      bytes: stored,
+    }),
+  });
+  await claimAndDispatch(ctx, dispatcher, "lookbook-pdf");
+  expect(sent.text).toBeUndefined();
+  expect(sent.doc?.mimeType).toBe("application/pdf");
+  expect(sent.doc?.bytes.toString("latin1")).toBe("%PDF-1.4 lookbook-bytes");
+  expect(sent.doc?.caption).toBe("Here is the lookbook.");
+  expect(sent.doc?.caption).not.toBe(INVOICE_PDF_CAPTION);
+  expect(sent.doc?.caption).not.toContain("ql.app");
+  expect(sent.doc?.caption).not.toContain("Teach");
+  db.close();
+});
+
+test("an invoice-named stored PDF is not sent as a lookbook", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, sent } = dispatchHarness(ctx, LOOKBOOK_REPLY, {
+    recoverStored: async () => ({
+      identifier: "sept_invoice_20332",
+      title: "SEPT-INV-20332.pdf",
+      fileName: "SEPT-INV-20332.pdf",
+      mimeType: "application/pdf",
+      bytes: Buffer.from("%PDF-1.4 invoice"),
+    }),
+  });
+  await claimAndDispatch(ctx, dispatcher, "lookbook-not-invoice");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(DOCUMENT_PREPARING_TEXT);
+  db.close();
+});
+
+test("a lookbook PDF already on the turn is attached without the teach footer", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const pdf = Buffer.from("%PDF-1.4 native-lookbook");
+  const { dispatcher, sent } = dispatchHarness(
+    ctx,
+    `${LOOKBOOK_REPLY}\n<artifact type="pdf" identifier="fw26_lookbook" />`,
+    {
+      artifacts: [{
+        identifier: "fw26_lookbook",
+        title: "FW26 Lookbook.pdf",
+        artifact_type: "pdf",
+        artifact_reference: { artifact_id: "art-lb", version: 0 },
+      }],
+      resolve: () => [{
+        ok: true,
+        artifact: {
+          identifier: "fw26_lookbook",
+          title: "FW26 Lookbook.pdf",
+          fileName: "FW26 Lookbook.pdf",
+          mimeType: "application/pdf",
+          bytes: pdf,
+        },
+      }],
+    },
+  );
+  await claimAndDispatch(ctx, dispatcher, "lookbook-native");
+  expect(sent.doc?.mimeType).toBe("application/pdf");
+  expect(sent.doc?.bytes.toString("latin1")).toBe("%PDF-1.4 native-lookbook");
+  expect(sent.doc?.caption).not.toContain("ql.app");
+  expect(sent.doc?.caption).not.toContain("Teach");
+  expect(sent.doc?.caption).not.toBe(DOCUMENT_PDF_CAPTION);
+  db.close();
+});
+
+test("catalogue PDF with no file says it is preparing and does not invent a PDF", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, sent } = dispatchHarness(ctx, "Here is the catalogue PDF.\nhttps://ql.app/l/Cat12345");
+  await claimAndDispatch(ctx, dispatcher, "catalogue");
+  expect(sent.doc).toBeUndefined();
+  expect(sent.text).toBe(DOCUMENT_PREPARING_TEXT);
+  expect(sent.text).not.toContain("ql.app");
+  db.close();
+});
+
+test("repeated document preparing lines in one chat collapse", async () => {
+  const { ctx, db } = makeTestApp(testConfig({ logLevel: "info" }));
+  const { dispatcher, texts } = dispatchHarness(ctx, LOOKBOOK_REPLY);
+  for (let i = 0; i < 3; i++) {
+    await claimAndDispatch(ctx, dispatcher, `doc-prep-${i}`);
+  }
+  expect(texts).toEqual([DOCUMENT_PREPARING_TEXT]);
   db.close();
 });
 

@@ -149,6 +149,19 @@ const EnvSchema = z.object({
   // Example: http://64.225.89.130 — must be reachable from PromptQL Cloud.
   // Prefer :80/:443. PromptQL Cloud egress often cannot fetch :8790.
   GATEWAY_PUBLIC_BASE_URL: z.string().url().or(z.literal("")).default(""),
+
+  // Voice notes are transcribed here, before ask_promptql, so PromptQL never
+  // sees the audio file (that file is what triggers the approval-gated
+  // "Transcribe voice note" tool). Empty URL withholds the audio and sends
+  // an honest line when the turn is voice-only. OpenAI-compatible multipart
+  // POST: file + model, JSON { text }.
+  GATEWAY_VOICE_STT_URL: z.string().url().or(z.literal("")).default(""),
+  GATEWAY_VOICE_STT_API_KEY: z.string().optional().transform((value) => {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+  }),
+  GATEWAY_VOICE_STT_MODEL: z.string().min(1).default("whisper-1"),
+  GATEWAY_VOICE_STT_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(20_000),
 }).refine((e) => e.WHATSAPP_PA_REPLY_DELAY_MIN_MS <= e.WHATSAPP_PA_REPLY_DELAY_MAX_MS, {
   path: ["WHATSAPP_PA_REPLY_DELAY_MAX_MS"],
   message: "must be greater than or equal to WHATSAPP_PA_REPLY_DELAY_MIN_MS",
@@ -183,6 +196,17 @@ export interface Config {
   relayUnregisteredChats: boolean;
   /** Public origin for ephemeral media bridge URLs; empty disables bridge. */
   publicBaseUrl: string;
+
+  /**
+   * Optional OpenAI-compatible speech endpoint. Empty means voice notes are
+   * still withheld from PromptQL, without a transcript.
+   */
+  voiceStt: {
+    url: string;
+    apiKey?: string;
+    model: string;
+    timeoutMs: number;
+  };
 
   /** Issue #25: inject shared craft into ask_promptql system_instruction. */
   orgCraftInject: boolean;
@@ -242,6 +266,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     inFlightWaitMs: e.GATEWAY_IN_FLIGHT_WAIT_MS,
     relayUnregisteredChats: e.RELAY_UNREGISTERED_CHATS,
     publicBaseUrl: e.GATEWAY_PUBLIC_BASE_URL.replace(/\/+$/, ""),
+
+    voiceStt: {
+      url: e.GATEWAY_VOICE_STT_URL,
+      apiKey: e.GATEWAY_VOICE_STT_API_KEY,
+      model: e.GATEWAY_VOICE_STT_MODEL,
+      timeoutMs: e.GATEWAY_VOICE_STT_TIMEOUT_MS,
+    },
 
     orgCraftInject: e.ORG_CRAFT_INJECT,
     orgCraftFile: e.ORG_CRAFT_FILE || undefined,

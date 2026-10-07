@@ -50,6 +50,33 @@ User Mention: <user_mention id="0e87f95e-af98-4d05-865e-0c66270b4dc9" />
     }
   });
 
+  it("strips hyphenated Teach-SEPT and teach-footer lines", () => {
+    const sanitized = sanitizeOutboundText(
+      "Here is the lookbook.\n\n🧠 Teach-SEPT → https://ql.app/l/i44VehWS\nTeach footer: internal",
+    );
+    expect(sanitized).toBe("Here is the lookbook.");
+    expect(sanitized.toLowerCase()).not.toContain("teach");
+    expect(sanitized).not.toContain("ql.app");
+  });
+
+  it("drops false approval-setting claims and keeps ordinary approval copy", () => {
+    expect(sanitizeOutboundText("Setting all background approvals to auto-approve")).toBe("");
+    expect(sanitizeOutboundText(
+      "The Kelly 28 is available in gold.\n\nSetting all background approvals to auto-approve.",
+    )).toBe("The Kelly 28 is available in gold.");
+    expect(sanitizeOutboundText(
+      "This request needs approval for a sensitive action. It was not auto-approved — please review it in the workspace.",
+    )).toBe(
+      "This request needs approval for a sensitive action. It was not auto-approved — please review it in the workspace.",
+    );
+    expect(sanitizeOutboundText("Draft messages in your voice, for your approval")).toBe(
+      "Draft messages in your voice, for your approval",
+    );
+    expect(sanitizeOutboundText("I cannot change approval settings from this chat.")).toBe(
+      "I cannot change approval settings from this chat.",
+    );
+  });
+
   it("Criterion 3: False-positive test - Legitimate client-facing URLs are NOT stripped", () => {
     const legitimate = `Hi Sarah, here are the links for your piece:
 Instagram post: https://instagram.com/p/C-xyz123
