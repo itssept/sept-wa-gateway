@@ -149,16 +149,25 @@ export interface ResolvedArtifact {
 export type ArtifactFailureReason = "too_large" | "unavailable" | "not_attachable";
 
 /** The per-reference outcome of resolveArtifacts: either sendable bytes or a
- *  reason the artifact was dropped. Order matches the referenced order. */
+ *  reason the artifact was dropped. Order matches the referenced order.
+ *  `factText` is plain invoice text already in a dropped chip (no HTML), used
+ *  only to fill a branded PDF. It is never logged. */
 export type ArtifactOutcome =
   | { ok: true; artifact: ResolvedArtifact }
-  | { ok: false; identifier: string; reason: ArtifactFailureReason };
+  | { ok: false; identifier: string; reason: ArtifactFailureReason; factText?: string };
 
 /** A reference parsed out of the final response's inline <artifact .../> tags. */
 export interface ArtifactRef {
   identifier: string;
   type: string | null;
 }
+
+// PromptQL sometimes serializes the zero-based version as a string ("0").
+// A numeric schema then drops the whole artifact, so the PDF is never downloaded.
+const CoercedVersion = z.preprocess(
+  (value) => (typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value),
+  z.number().int().nonnegative().nullish(),
+);
 
 // One entry of the completed response's `artifacts[]`. Verified live: it carries
 // the inline `identifier`, plus an `artifact_reference` with the real UUID
@@ -170,7 +179,7 @@ const ResponseArtifactSchema = z.object({
   artifact_type: z.string().nullish(),
   artifact_reference: z.object({
     artifact_id: z.string().min(1),
-    version: z.number().int().nonnegative().nullish(),
+    version: CoercedVersion,
   }),
 }).passthrough();
 export type ResponseArtifact = z.infer<typeof ResponseArtifactSchema>;
@@ -234,8 +243,11 @@ export function parseArtifactRefs(text: string): { text: string; refs: ArtifactR
 //   - image / audio   -> { type:"image"|"audio", data:<base64>, mimeType }
 //   - html/table/viz/
 //     file / binary   -> { type:"resource", resource:{ text | blob:<base64>, mimeType, uri } }
-// We take the FIRST block that yields bytes. `uri` is an artifact:// resource id,
-// not content, so it is ignored for the payload.
+// Live invoice failures put an HTML chip or a ql.app permalink in the first
+// block and the application/pdf blob in a later one. Taking the first block
+// marked the download not_attachable and recovery never saw the PDF.
+// `artifact://` URIs are ids, not bytes. An https URI is fetched only when it
+// looks like a PDF and the blocks themselves are not one.
 const McpResourceSchema = z.object({
   text: z.string().optional(),
   blob: z.string().optional(),
@@ -249,9 +261,6 @@ const McpContentBlockSchema = z.object({
   mimeType: z.string().optional(),
   resource: McpResourceSchema.optional(),
 }).passthrough();
-const McpResultSchema = z.object({
-  content: z.array(McpContentBlockSchema).optional(),
-}).passthrough();
 
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 function decodeBase64(s: string): Buffer | null {
@@ -259,33 +268,178 @@ function decodeBase64(s: string): Buffer | null {
   return Buffer.from(s, "base64");
 }
 
-/** Pull the artifact bytes + mime out of an MCP tool result's content blocks. */
-function bytesFromMcpResult(raw: unknown): { bytes: Buffer; mime: string | null } | null {
-  const parsed = McpResultSchema.safeParse(raw ?? {});
-  if (!parsed.success || !parsed.data.content) return null;
-  for (const block of parsed.data.content) {
-    // Inline binary block (image/audio): base64 in `data`.
-    if (typeof block.data === "string") {
-      const bytes = decodeBase64(block.data);
-      if (bytes?.length) return { bytes, mime: block.mimeType ?? null };
+type McpBlock = z.infer<typeof McpContentBlockSchema>;
+
+function contentBlocks(raw: unknown): McpBlock[] {
+  const content = raw && typeof raw === "object" && "content" in raw
+    ? (raw as { content?: unknown }).content
+    : undefined;
+  if (!Array.isArray(content)) return [];
+  const blocks: McpBlock[] = [];
+  for (const block of content) {
+    // One bad block must not drop a later PDF. The whole-array schema did.
+    const parsed = McpContentBlockSchema.safeParse(block);
+    if (parsed.success) blocks.push(parsed.data);
+  }
+  return blocks;
+}
+
+function blockBytes(block: McpBlock): { bytes: Buffer; mime: string | null } | null {
+  if (typeof block.data === "string") {
+    const bytes = decodeBase64(block.data);
+    if (bytes?.length) return { bytes, mime: block.mimeType ?? null };
+  }
+  const res = block.resource;
+  if (res) {
+    if (typeof res.blob === "string") {
+      const bytes = decodeBase64(res.blob);
+      if (bytes?.length) return { bytes, mime: res.mimeType ?? block.mimeType ?? null };
     }
-    // Embedded resource: bytes in `resource.blob` (base64) or `resource.text`.
-    const res = block.resource;
-    if (res) {
-      if (typeof res.blob === "string") {
-        const bytes = decodeBase64(res.blob);
-        if (bytes?.length) return { bytes, mime: res.mimeType ?? null };
-      }
-      if (typeof res.text === "string" && res.text !== "") {
-        return { bytes: Buffer.from(res.text, "utf8"), mime: res.mimeType ?? null };
-      }
-    }
-    // Plain text block.
-    if (block.type === "text" && typeof block.text === "string" && block.text !== "") {
-      return { bytes: Buffer.from(block.text, "utf8"), mime: block.mimeType ?? null };
+    if (typeof res.text === "string" && res.text !== "") {
+      return { bytes: Buffer.from(res.text, "utf8"), mime: res.mimeType ?? block.mimeType ?? null };
     }
   }
+  if (block.type === "text" && typeof block.text === "string" && block.text !== "") {
+    return { bytes: Buffer.from(block.text, "utf8"), mime: block.mimeType ?? null };
+  }
   return null;
+}
+
+function isPdfHeader(bytes: Buffer, offset: number): boolean {
+  return offset >= 0
+    && offset + 5 <= bytes.length
+    && bytes[offset] === 0x25
+    && bytes[offset + 1] === 0x50
+    && bytes[offset + 2] === 0x44
+    && bytes[offset + 3] === 0x46
+    && bytes[offset + 4] === 0x2d;
+}
+
+/**
+ * Bytes of a PDF, starting at `%PDF-`. A UTF-8 BOM or leading whitespace is
+ * skipped. `allowPreamble` also accepts the 1024-byte preamble the PDF spec
+ * allows, but only when the caller already believes the payload is a PDF —
+ * otherwise a markdown note that mentions `%PDF-` would be sliced into a file.
+ */
+export function pdfPayload(bytes: Buffer, allowPreamble = false): Buffer | null {
+  if (!bytes || bytes.length < 5) return null;
+  let i = 0;
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) i = 3;
+  while (i < bytes.length && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) i++;
+  if (isPdfHeader(bytes, i)) return bytes.subarray(i);
+  if (!allowPreamble) return null;
+  const end = Math.min(bytes.length - 5, 1024);
+  for (let j = 0; j <= end; j++) {
+    if (isPdfHeader(bytes, j)) return bytes.subarray(j);
+  }
+  return null;
+}
+
+/** PDF hidden as base64 or a data URL inside an HTML/JSON chip. */
+function embeddedPdfBytes(bytes: Buffer): Buffer | null {
+  if (bytes.length < 16 || bytes.length > 8_000_000) return null;
+  const head = bytes.subarray(0, Math.min(bytes.length, 1_500_000)).toString("latin1");
+  const dataUrl = /data:application\/pdf;base64,([A-Za-z0-9+/=\r\n]+)/i.exec(head);
+  if (dataUrl?.[1]) {
+    const decoded = decodeBase64(dataUrl[1].replace(/\s+/g, ""));
+    const payload = decoded ? pdfPayload(decoded, true) : null;
+    if (payload) return Buffer.from(payload);
+  }
+  const trimmed = head.trim();
+  if (trimmed.length >= 20 && trimmed.length % 4 === 0 && BASE64_RE.test(trimmed)) {
+    const decoded = decodeBase64(trimmed);
+    const payload = decoded ? pdfPayload(decoded) : null;
+    if (payload) return Buffer.from(payload);
+  }
+  // "%PDF-" in base64. A chip that only links to ql.app does not contain this.
+  const idx = head.indexOf("JVBERi0");
+  if (idx < 0) return null;
+  const run = head.slice(idx).match(/^[A-Za-z0-9+/=\r\n]+/)?.[0]?.replace(/\s+/g, "") ?? "";
+  const padded = run.slice(0, run.length - (run.length % 4));
+  if (padded.length < 16) return null;
+  const decoded = decodeBase64(padded);
+  const payload = decoded ? pdfPayload(decoded, true) : null;
+  return payload ? Buffer.from(payload) : null;
+}
+
+function directPdf(bytes: Buffer, mime: string | null): Buffer | null {
+  const m = (mime ?? "").split(";")[0]!.trim().toLowerCase();
+  const payload = pdfPayload(bytes, m === "application/pdf" || m === "application/octet-stream");
+  return payload ? Buffer.from(payload) : null;
+}
+
+/** Pull artifact bytes. A real PDF block wins over an earlier HTML or permalink. */
+function bytesFromMcpResult(raw: unknown): { bytes: Buffer; mime: string | null } | null {
+  const extracted = contentBlocks(raw)
+    .map(blockBytes)
+    .filter((block): block is { bytes: Buffer; mime: string | null } => !!block?.bytes.length);
+  const direct = extracted.find((block) => directPdf(block.bytes, block.mime));
+  if (direct) return direct;
+  const embedded = extracted.find((block) => embeddedPdfBytes(block.bytes));
+  if (embedded) return embedded;
+  return extracted[0] ?? null;
+}
+
+function isPrivateAddress(host: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    const parts = v4.slice(1).map(Number);
+    if (parts.some((part) => part > 255)) return true;
+    const a = parts[0]!;
+    const b = parts[1]!;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  if (host.includes(":")) {
+    return host === "::1" || host === "::" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80");
+  }
+  return false;
+}
+
+/** https PDF URLs only. ql.app permalinks are HTML chips, not files. Private hosts are not fetched. */
+function isFetchablePdfUrl(uri: string, mime: string | null): boolean {
+  let url: URL;
+  try { url = new URL(uri); } catch { return false; }
+  if (url.protocol !== "https:" || url.username || url.password) return false;
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")
+    || host === "ql.app" || host.endsWith(".ql.app") || host === "metadata.google.internal"
+    || isPrivateAddress(host)
+  ) return false;
+  const m = (mime ?? "").split(";")[0]!.trim().toLowerCase();
+  if (m === "application/pdf" || m === "application/octet-stream") return true;
+  return url.pathname.toLowerCase().endsWith(".pdf");
+}
+
+function pdfResourceUris(raw: unknown): string[] {
+  const uris: string[] = [];
+  const seen = new Set<string>();
+  for (const block of contentBlocks(raw)) {
+    const mime = block.resource?.mimeType ?? block.mimeType ?? null;
+    const candidates = [block.resource?.uri];
+    if (block.type === "text" && typeof block.text === "string") candidates.push(block.text.trim());
+    for (const candidate of candidates) {
+      if (!candidate || seen.has(candidate) || !isFetchablePdfUrl(candidate, mime)) continue;
+      seen.add(candidate);
+      uris.push(candidate);
+    }
+  }
+  return uris;
+}
+
+/** Invoice id already written inside a chip, as plain text. Never the raw HTML. */
+function invoiceFactText(bytes: Buffer): string | undefined {
+  if (bytes.length > 200_000) return undefined;
+  const raw = bytes.subarray(0, 8000).toString("utf8");
+  if (!/\b(?:SEPT-)?INV-\d{3,}/i.test(raw)) return undefined;
+  const stripped = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 2000);
+  if (!stripped || (stripped.match(/\uFFFD/g)?.length ?? 0) > 10) return undefined;
+  return stripped;
 }
 
 const AskStatusSchema = z.enum([
@@ -647,12 +801,17 @@ export class PromptQlAdapter {
           args.version = art.artifact_reference.version;
         }
         const result = await session.callTool(TOOL_DOWNLOAD_ARTIFACT, args);
-        const decoded = this.decodeArtifact(ref, art, result.raw, maxBytes);
+        const decoded = await this.decodeArtifact(ref, art, result.raw, maxBytes);
         if ("artifact" in decoded) {
           outcomes.push({ ok: true, artifact: decoded.artifact });
         } else {
           this.log.warn("artifact skipped", { identifier: maskArtifact(ref.identifier), reason: decoded.reason });
-          outcomes.push({ ok: false, identifier: ref.identifier, reason: decoded.reason });
+          outcomes.push({
+            ok: false,
+            identifier: ref.identifier,
+            reason: decoded.reason,
+            ...(decoded.factText ? { factText: decoded.factText } : {}),
+          });
         }
       } catch (err) {
         // Never let one artifact fail the whole reply. The server's error body
@@ -691,18 +850,23 @@ export class PromptQlAdapter {
     maxBytes: number,
     mode: "invoice" | "document" = "invoice",
   ): Promise<ResolvedArtifact | null> {
-    if (!threadId.trim()) return null;
+    // Never reject. A throw here is the dispatcher's "pdf recovery failed"
+    // log, and the invoice turn then leaves with no file. A non-string thread
+    // id used to throw before the try (`threadId.trim`).
     try {
+      if (typeof threadId !== "string" || !threadId.trim()) return null;
       const session = this.session(shopperId);
       const listed = await session.callTool(TOOL_LIST_ARTIFACTS, { thread_id: threadId });
-      const candidates = rankStoredPdfCandidates(parseListedArtifacts(listed.structured ?? listed.raw), mode)
-        .slice(0, 4);
+      const fromStructured = parseListedArtifacts(listed.structured);
+      // An empty structured object must not hide the JSON copy in content[].text.
+      const rows = fromStructured.length > 0 ? fromStructured : parseListedArtifacts(listed.raw);
+      const candidates = rankStoredPdfCandidates(rows, mode).slice(0, 4);
       for (const candidate of candidates) {
         const args: Record<string, unknown> = { artifact_id: candidate.artifactId };
         if (typeof candidate.version === "number") args.version = candidate.version;
         try {
           const result = await session.callTool(TOOL_DOWNLOAD_ARTIFACT, args);
-          const decoded = this.decodeArtifact(
+          const decoded = await this.decodeArtifact(
             { identifier: candidate.identifier, type: candidate.artifactType },
             {
               identifier: candidate.identifier,
@@ -716,7 +880,7 @@ export class PromptQlAdapter {
             result.raw,
             maxBytes,
           );
-          if ("artifact" in decoded && looksLikePdf(decoded.artifact.bytes)) return decoded.artifact;
+          if ("artifact" in decoded && pdfPayload(decoded.artifact.bytes)) return decoded.artifact;
         } catch (err) {
           this.log.warn("stored pdf candidate skipped", {
             identifier: maskArtifact(candidate.identifier),
@@ -725,39 +889,103 @@ export class PromptQlAdapter {
         }
       }
     } catch (err) {
-      this.log.warn("stored pdf listing failed", { err });
+      try { this.log.warn("stored pdf listing failed", { err }); } catch { /* the reply still has to go out */ }
     }
     return null;
+  }
+
+  /** Fetch one https PDF URL. HTML bodies, private hosts, and expired links
+   *  return null. The URL is never logged (signed links can carry secrets). */
+  private async fetchPdfUrl(uri: string, maxBytes: number): Promise<Buffer | null> {
+    if (!isFetchablePdfUrl(uri, "application/pdf")) return null;
+    const response = await fetch(uri, { redirect: "follow", signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) return null;
+    // A redirect onto a permalink or a private host is not a PDF source.
+    // An empty response.url means this runtime did not record one; the request URL was already checked.
+    if (response.url && !isFetchablePdfUrl(response.url, "application/pdf")) return null;
+    const declared = Number(response.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > maxBytes) return null;
+    const reader = response.body?.getReader();
+    if (!reader) return null;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          return null;
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const payload = pdfPayload(Buffer.concat(chunks), true);
+    return payload ? Buffer.from(payload) : null;
   }
 
   /** Normalize a downloaded artifact into WhatsApp-sendable bytes, or a failure
    *  reason: `too_large` past the cap, `unavailable` when empty or unrecoverable.
    *  `raw` is the download_promptql_artifact MCP result (typed content blocks);
    *  `meta` supplies title/type from the metadata listing. */
-  private decodeArtifact(
+  private async decodeArtifact(
     ref: ArtifactRef,
     art: ResponseArtifact,
     raw: unknown,
     maxBytes: number,
-  ): { artifact: ResolvedArtifact } | { reason: ArtifactFailureReason } {
+  ): Promise<{ artifact: ResolvedArtifact } | { reason: ArtifactFailureReason; factText?: string }> {
     const type = ref.type ?? art.artifact_type ?? null;
     const title = art.title ?? ref.identifier;
 
     // Pull raw bytes out of the MCP content blocks — never the JSON envelope.
+    // A PDF block beats an earlier HTML chip or permalink. A base64 PDF inside
+    // that chip counts too. Otherwise try a real https PDF URL on the block.
     const extracted = bytesFromMcpResult(raw);
-    if (!extracted || extracted.bytes.length === 0) return { reason: "unavailable" };
-    const bytes = extracted.bytes;
+    let bytes = extracted?.bytes ?? Buffer.alloc(0);
+    const mimeHint = extracted?.mime ?? null;
+    let pdf = bytes.length ? (directPdf(bytes, mimeHint) ?? embeddedPdfBytes(bytes)) : null;
+    if (!pdf) {
+      for (const uri of pdfResourceUris(raw)) {
+        try {
+          pdf = await this.fetchPdfUrl(uri, maxBytes);
+        } catch {
+          pdf = null;
+        }
+        if (pdf) break;
+      }
+    }
+    if (pdf) {
+      if (pdf.length > maxBytes) {
+        this.log.warn("artifact exceeds size cap", {
+          identifier: maskArtifact(ref.identifier), sizeBytes: pdf.length, maxBytes,
+        });
+        return { reason: "too_large" };
+      }
+      return {
+        artifact: {
+          identifier: ref.identifier,
+          title,
+          fileName: artifactFileName(ref.identifier, type, "application/pdf", title),
+          mimeType: "application/pdf",
+          bytes: pdf,
+        },
+      };
+    }
+
+    if (bytes.length === 0) return { reason: "unavailable" };
+    const factText = invoiceFactText(bytes);
     if (bytes.length > maxBytes) {
       this.log.warn("artifact exceeds size cap", {
         identifier: maskArtifact(ref.identifier), sizeBytes: bytes.length, maxBytes,
       });
-      return { reason: "too_large" };
+      return factText ? { reason: "too_large", factText } : { reason: "too_large" };
     }
-    let resolvedMime = extracted.mime ?? mimeForType(type) ?? "application/octet-stream";
-    // Magic-byte sniff: PromptQL sometimes labels a real PDF as text/json.
-    if (looksLikePdf(bytes)) resolvedMime = "application/pdf";
+    let resolvedMime = mimeHint ?? mimeForType(type) ?? "application/octet-stream";
     // HTML labeled as a file, octet-stream, or even application/pdf is still a chip.
-    else if (looksLikeHtmlBytes(bytes)) resolvedMime = "text/html";
+    if (looksLikeHtmlBytes(bytes)) resolvedMime = "text/html";
 
     // Never relay json/md/html as WhatsApp documents — live regression
     // 2026-09-28 sent artifact-invoice_*.json + *.md. Also skip invoice-like
@@ -770,7 +998,7 @@ export class PromptQlAdapter {
         mimeType: resolvedMime,
         type,
       });
-      return { reason: "not_attachable" };
+      return factText ? { reason: "not_attachable", factText } : { reason: "not_attachable" };
     }
 
     return {
@@ -881,9 +1109,7 @@ export function isInvoiceArtifactRef(identifier: string, title?: string | null):
 }
 
 function looksLikePdf(bytes: Buffer): boolean {
-  // %PDF-
-  return bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 &&
-    bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+  return pdfPayload(bytes) != null;
 }
 
 /**
@@ -907,10 +1133,11 @@ const ListedArtifactSchema = z.object({
   mime_type: z.string().nullish(),
   content_type: z.string().nullish(),
   artifact_id: z.string().min(1).optional(),
-  version: z.number().int().nonnegative().nullish(),
+  id: z.string().min(1).optional(),
+  version: CoercedVersion,
   artifact_reference: z.object({
     artifact_id: z.string().min(1),
-    version: z.number().int().nonnegative().nullish(),
+    version: CoercedVersion,
   }).optional(),
   metadata: z.object({
     file: z.object({
@@ -931,21 +1158,31 @@ interface InvoicePdfCandidate {
   rank: number;
 }
 
+function artifactIdOf(entry: ListedArtifact): string | null {
+  return entry.artifact_reference?.artifact_id ?? entry.artifact_id ?? entry.id ?? null;
+}
+
 function parseListedArtifacts(value: unknown): ListedArtifact[] {
   const out: ListedArtifact[] = [];
   const visit = (node: unknown, depth: number): void => {
-    if (depth > 5 || node == null) return;
+    if (depth > 6 || node == null) return;
+    if (typeof node === "string") {
+      const trimmed = node.trim();
+      // MCP often copies structuredContent into content[].text as a JSON string.
+      // An empty structured object used to hide that copy.
+      if (trimmed.length > 1_000_000 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return;
+      try { visit(JSON.parse(trimmed), depth + 1); } catch { /* not a listing */ }
+      return;
+    }
     if (Array.isArray(node)) {
       for (const item of node) visit(item, depth + 1);
       return;
     }
     if (typeof node !== "object") return;
     const parsed = ListedArtifactSchema.safeParse(node);
-    if (parsed.success && (parsed.data.artifact_reference?.artifact_id || parsed.data.artifact_id)) {
-      out.push(parsed.data);
-    }
+    if (parsed.success && artifactIdOf(parsed.data)) out.push(parsed.data);
     const obj = node as Record<string, unknown>;
-    for (const key of ["artifacts", "items", "results", "data", "structuredContent"]) {
+    for (const key of ["artifacts", "items", "results", "data", "structuredContent", "content", "text"]) {
       if (key in obj) visit(obj[key], depth + 1);
     }
   };
@@ -968,15 +1205,17 @@ export function rankStoredPdfCandidates(
   const ranked: InvoicePdfCandidate[] = [];
   const seen = new Set<string>();
   for (const entry of listed) {
-    const artifactId = entry.artifact_reference?.artifact_id ?? entry.artifact_id;
+    const artifactId = artifactIdOf(entry);
     if (!artifactId || seen.has(artifactId)) continue;
     const type = (entry.artifact_type ?? "").toLowerCase();
-    if (NON_ATTACHABLE_ARTIFACT_TYPES.has(type)) continue;
-    const mime = (
-      entry.mime_type ?? entry.content_type ?? entry.metadata?.file?.content_type ?? ""
-    ).split(";")[0]!.trim().toLowerCase();
+    const mimeRaw = entry.mime_type ?? entry.content_type ?? entry.metadata?.file?.content_type ?? "";
+    const mime = typeof mimeRaw === "string" ? mimeRaw.split(";")[0]!.trim().toLowerCase() : "";
     const name = `${entry.identifier} ${entry.title ?? ""} ${entry.metadata?.file?.file_name ?? ""}`.toLowerCase();
     if (mode === "document" && isInvoiceListingName(name)) continue;
+    // Invoice recovery still opens an invoice-named json/html sidecar. The
+    // bytes are attached only when decode finds a real PDF inside them.
+    // Document mode never does — a lookbook must not pick up an old invoice.
+    if (NON_ATTACHABLE_ARTIFACT_TYPES.has(type) && !(mode === "invoice" && isInvoiceListingName(name))) continue;
     let rank = 99;
     if (mime === "application/pdf" || type === "pdf") rank = 0;
     else if (name.endsWith(".pdf") || (mode === "document" && /lookbook|catalog|brochure|deck/.test(name))) rank = 1;
@@ -1084,6 +1323,12 @@ function sanitizeArtifactFileName(title: string | null, preferredExt: string): s
   const safe = cleaned.replace(/ /g, "_").slice(0, 180);
   if (!safe) return null;
   const lower = safe.toLowerCase();
+  // WhatsApp shows a document from its filename. A PDF titled invoice.html
+  // (the chip's name) is not opened as a PDF.
+  if (preferredExt === ".pdf" && !lower.endsWith(".pdf")) {
+    const stripped = safe.replace(/\.(html?|json|md|txt|csv)$/i, "") || "document";
+    return `${stripped}.pdf`;
+  }
   const knownExts = Object.values(MIME_EXT);
   if (knownExts.some((e) => e && lower.endsWith(e))) return safe;
   if (!preferredExt || preferredExt === "." || lower.endsWith(preferredExt)) return safe;

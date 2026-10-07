@@ -49,6 +49,7 @@ import {
   isPdfishArtifactRef,
   shouldEnforceDocumentPdf,
   shouldEnforceInvoicePdf,
+  whatsAppPdfDocument,
 } from "./invoicePdfGuard.ts";
 
 export interface DispatchInput {
@@ -220,8 +221,13 @@ export class OutboundDispatcher {
           listed?.title,
         )) return false;
         // A skipped HTML/json/md file is not a failed official PDF download.
-        const skipped = outcomes.find((o) => !o.ok && o.identifier === ref.identifier);
-        if (skipped?.ok === false && skipped.reason === "not_attachable") return false;
+        // Neither is a download that succeeded as a permalink or the wrong
+        // content-type — those bytes are not a PDF, so a facts PDF may still
+        // be built. unavailable / too_large of a real file reference stays a
+        // failed download and is not replaced from chat.
+        const outcome = outcomes.find((o) => (o.ok ? o.artifact.identifier : o.identifier) === ref.identifier);
+        if (outcome?.ok === false && outcome.reason === "not_attachable") return false;
+        if (outcome?.ok && !isApplicationPdf(outcome.artifact)) return false;
         return true;
       });
       let recovered: ResolvedArtifact | null = null;
@@ -246,9 +252,15 @@ export class OutboundDispatcher {
           log.warn("pdf recovery failed", { err });
         }
       }
+      const supplementalText = outcomes
+        .flatMap((outcome) => (!outcome.ok && outcome.factText ? [outcome.factText] : []))
+        .join("\n")
+        .slice(0, 4000);
       const decision = ensureOutboundPdf({
         reply,
         operatorText: input.operatorText,
+        // Facts stated inside a dropped chip. Not logged.
+        supplementalText,
         hasPdf: false,
         referencedPdf,
         recovered,
@@ -327,7 +339,7 @@ export class OutboundDispatcher {
       const ref = first
         ? await this.connection.sendDocument(
             input.chatJid,
-            { bytes: first.bytes, fileName: first.fileName, mimeType: first.mimeType, caption: caption || undefined },
+            { ...documentForWhatsApp(first), caption: caption || undefined },
             {
               pacingProfile: input.pacingProfile,
               beforeSend: canSend,
@@ -383,7 +395,7 @@ export class OutboundDispatcher {
       try {
         const ref = await this.connection.sendDocument(
           input.chatJid,
-          { bytes: artifact.bytes, fileName: artifact.fileName, mimeType: artifact.mimeType },
+          documentForWhatsApp(artifact),
           {
             pacingProfile: input.pacingProfile,
             beforeSend: canSend,
@@ -521,6 +533,16 @@ export function cleanArtifactPermalinks(text: string): string {
  * "(2 attachments couldn't be retrieved)". Returns the text unchanged when
  * there were no failures.
  */
+/** A real PDF goes out as application/pdf, header at byte 0, name ending in .pdf.
+ *  Other documents keep the mime and name they already had. */
+function documentForWhatsApp(artifact: ResolvedArtifact): { bytes: Buffer; fileName: string; mimeType: string } {
+  return whatsAppPdfDocument(artifact) ?? {
+    bytes: artifact.bytes,
+    fileName: artifact.fileName,
+    mimeType: artifact.mimeType,
+  };
+}
+
 function isHtmlChip(artifact: { mimeType: string; bytes: Buffer }): boolean {
   const mime = artifact.mimeType.split(";")[0]!.trim().toLowerCase();
   if (mime === "text/html" || mime === "application/xhtml+xml") return true;
